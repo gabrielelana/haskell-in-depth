@@ -1,0 +1,276 @@
+#+TITLE: Functions and Types
+
+#+PROPERTY: header-args:haskell :results replace output
+#+PROPERTY: header-args:haskell+ :noweb yes
+#+PROPERTY: header-args:haskell+ :wrap EXAMPLE
+
+Solving problems the Haskell Way
+- Use GHCi to prototype
+- Express ideas with types
+- Keep code pure as much as possible
+
+* 1.01 Solving problems in the GHCi REPL with functions
+
+Problem we need to face
+- Extract all the words from a given text file
+- Count the number of unique words used
+- Find the most frequently used words
+
+NOTE: I keep forgetting that GHCi runs in IO (with do notation?)
+
+#+BEGIN_SRC haskell
+import Data.List
+import Data.Char
+text <- readFile "/home/coder/code/haskell-in-depth/.repo/data/texts/hamlet.txt"
+ws = map head $ group $ sort $ words $ map toLower text
+take 7 ws
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+["&","'em?","'gainst","'tane","'tis","'tis,","'twas"]
+#+END_EXAMPLE
+
+Need to clean the words
+
+NOTE: The example is wrong, it doesn't clean the beginning and truncates
+hyphened words
+
+#+BEGIN_SRC haskell
+import Data.List
+import Data.Char
+text <- readFile "/home/coder/code/haskell-in-depth/.repo/data/texts/hamlet.txt"
+trimStart = dropWhile (not . isLetter)
+trimEnd = reverse . trimStart . reverse -- naive but who cares
+trimWords = map $ trimStart . trimEnd
+removeEmptyWords = filter (not . null)
+ws = map head $ group $ sort $ removeEmptyWords $ trimWords $ words $ map toLower text
+take 7 ws
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+["a","a'th","a-crosse","a-downe","a-downe-a","a-dreames","a-foot"]
+#+END_EXAMPLE
+
+* 1.02 From GHCi and String to GHC and Text
+
+Consider to use ~Text~ over ~String~ for performance
+
+NOTE: ~T.toCaseFold~ respects Unicode.
+
+#+BEGIN_SRC haskell :eval never
+import qualified Data.Text as T
+import qualified Data.Text.IO as TIO
+#+END_SRC
+
+#+BEGIN_SRC haskell
+import Data.Char
+import qualified Data.Text as T
+import qualified Data.Text.IO as TIO
+text <- TIO.readFile "/home/coder/code/haskell-in-depth/.repo/data/texts/hamlet.txt"
+trimWords = map (T.dropAround $ not . isLetter)
+normalizeWords = map T.toCaseFold
+removeEmptyWords = filter (not . T.null)
+ws = map head $ group $ sort $ removeEmptyWords $ trimWords $ normalizeWords $ T.words text
+take 7 ws
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+["a","a'th","a-crosse","a-downe","a-downe-a","a-dreames","a-foot"]
+#+END_EXAMPLE
+
+This is far from perfect (need to consider more Unicode stuff to break words and
+probably some knowledge of the natural language used) but the goal here is to
+how to structure a functional program.
+
+If you need it the look at ~Data.Text.ICU~ from ~text.icu~ on how to break words
+and other interesting things.
+
+* 1.03 Functional programs as sets of IO actions
+
+What we did until now it's more scripting than programming. In Haskell we
+express ideas in types and functions first and then we implement them.
+
+What are the types?
+
+#+BEGIN_SRC haskell :eval never
+type Entry = (T.Text, Int) -- One vocabulary entry
+type Vocabulary = [Entry]  -- List of entries
+#+END_SRC
+
+What are the functions?
+
+#+BEGIN_SRC haskell :eval never
+extractVocabulary :: T.Text -> Vocabulary
+printAllWords :: Vocabulary -> IO ()
+printWordsCount :: Vocabulary -> IO ()
+printFrequentWords :: Vocabulary -> Int -> IO ()
+processTextFile :: FilePath -> IO ()
+#+END_SRC
+
+Problems:
+- ~extractVocabulary~ is the only pure function
+- ~IO ()~ hides the inner working of the function
+- Many things that we need to do are not evident from the types
+
+* 1.04 Embrace pure functions
+
+We can extract the pure computation from ~printWordsCount~,
+~printFrequentWords~, ~processTextFile~, so the same functionality can be
+obtained by combining pure computation with the impure ~print~
+
+We can get most of the advantages of functional programming when we use pure
+function as much as possible: easier to combine, cannot break anything, easier
+to reason about their correctness.
+
+#+BEGIN_SRC haskell :eval never
+-- Pure and easily testable
+extractVocabulary :: T.Text -> Vocabulary
+allWords :: Vocabulary -> [Text]
+wordsCount :: Vocabulary -> (Int, Int)
+wordsByFrequency :: Vocabulary -> Vocabulary
+
+-- Pure and not so easily or conveniently testable
+allWordsReport :: Vocabulary -> Text
+wordsCountReport :: Vocabulary -> Text
+frequencyWordsReport :: Vocabulary -> Int -> Text
+
+-- Impure
+processTextFile :: FilePath -> Int -> IO ()
+main :: IO ()
+#+END_SRC
+
+** Sorting
+
+#+BEGIN_SRC haskell
+:t Data.List.sortBy
+:t compare
+:t Data.Ord.comparing
+-- instance Ord a => Ord (Data.Ord.Down a) -- Defined in ‘Data.Ord’
+:t Data.Ord.Down
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+Data.List.sortBy :: (a -> a -> Ordering) -> [a] -> [a]
+compare :: Ord a => a -> a -> Ordering
+Data.Ord.comparing :: Ord a => (b -> a) -> b -> b -> Ordering
+Data.Ord.Down :: a -> Data.Ord.Down a
+#+END_EXAMPLE
+
+Adopted solution
+
+#+BEGIN_SRC haskell :eval never
+wordsByFrequency :: Vocabulary -> Vocabulary
+wordsByFrequency = sortBy (comparing $ Down . snd)
+#+END_SRC
+
+See [[file:.repo/ch01/vocab3.hs][solution]]
+
+*** From "Descending sort in Haskell" blog post
+
+https://ro-che.info/articles/2016-04-02-descending-sort-haskell
+
+#+BEGIN_SRC haskell
+:t Data.List.sortBy
+:t Data.List.sortOn
+:t GHC.Exts.sortWith
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+Data.List.sortBy :: (a -> a -> Ordering) -> [a] -> [a]
+Data.List.sortOn :: Ord b => (a -> b) -> [a] -> [a]
+GHC.Exts.sortWith :: Ord b => (a -> b) -> [a] -> [a]
+#+END_EXAMPLE
+
+When you need to sort ~Ord a => [a]~
+
+#+BEGIN_SRC haskell :eval never
+sort = sortedBy compare
+sortDesc = sortedBy $ flip compare
+sortDesc = sortedBy $ comparing negate -- works only for Num
+sortDesc = sortedBy $ comparing Down
+
+-- shorter but slower of sortBy
+-- allocates memory to cache result of `f` (in this case `Down`)
+-- so useful when `f` is costly
+sortDesc = sortOn Down
+
+-- shorter, a little bit slower sortBy
+-- do not allocates memory, doesn't cache result of `f`
+sortDesc = sortWith Down
+
+-- naive solution
+-- works but not stable: do not preserve the orginal order of equal elements
+sortDesc = reverse . sort
+
+-- NOTE: `reverse` takes away lazyness
+
+-- θ(n)
+take 10 . sortBy (comparing Down)
+
+-- 𝙾(n log n)
+take 10 . reverse . sortBy compare
+#+END_SRC
+
+When you need to sort ~[a]~ but you have ~Ord b => a -> b~
+
+#+BEGIN_SRC haskell :eval never
+sort = sortedBy $ comparing f
+sortDesc = sortedBy $ comparing $ Down . f
+#+END_SRC
+
+** Formatting
+
+- Using ~T.pack~ and ~T.unpack~ is tedious
+- Concatenating ~String~ or ~Text~ puts pressure on memory
+
+Solutions
+
+- Use ~OverloadedStrings~ extension
+- Use text formatting solution or library
+  - ~Data.Text.Lazy.Builder~ puts together ~Text~ efficiently
+  - ~Text.Printf.printf~
+  - ~text-format~
+  - ~formatting~
+  - ~fmt~ <- used in the solution
+  - ~template~
+
+#+BEGIN_SRC shell :results output
+cd .repo
+stack exec vocab3 -- data/texts/hamlet.txt 10
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+Total number of words: 29575
+Number of unique words: 4827
+
+Frequent words:
+   the: 993
+   and: 862
+   to: 683
+   of: 610
+   i: 547
+   you: 522
+   my: 502
+   a: 497
+   it: 415
+   in: 384
+
+#+END_EXAMPLE
+
+* Highlights
+- In Haskell we express ideas in types and functions first and then we implement
+  them.
+- We can get most of the advantages of functional programming when we use pure
+  function as much as possible.
+- Use ~Text~ instead of ~String~ for processing textual information
+
+* Exercises
+- Complete [[file:chapter-01/text-search/text-search-start.hs::import qualified Prelude][this]] (see https://gitlab.com/-/snippets/2460790)
+- Implement "Hangman" game https://en.wikipedia.org/wiki/Hangman_(game)
+  HINT: keep code pure as much as possible
