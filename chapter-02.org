@@ -1,0 +1,502 @@
+#+TITLE: Type Classes
+
+#+PROPERTY: header-args:haskell :results replace output
+#+PROPERTY: header-args:haskell+ :noweb yes
+#+PROPERTY: header-args:haskell+ :wrap EXAMPLE
+
+Type Classes:
+- Are considered Haskell most prominent feature.
+- They capture an abstraction which have concrete implementation for a type and
+  a set of constraints. (ASK: is there a guide on how Haskell identifies the
+  concrete implementation of a type class?)
+- They allow you to write code targeting them promoting code reuse.
+- Are useful for libraries where you don't know in advance the concrete type.
+
+* 2.01 Manipulating a radar antenna with type classes
+
+An antenna has a direction and can be turned
+
+#+NAME: antenna-types
+#+BEGIN_SRC haskell :eval never
+data Direction = North | East | South | West
+data Turn = TNone | TLeft | TRight | TAround
+#+END_SRC
+
+** Rotating a radar
+
+#+BEGIN_SRC haskell :eval never :noweb yes
+<<antenna-types>>
+rotate :: Turn -> Direction -> Direction
+orient :: Direction -> Direction -> Turn
+#+END_SRC
+
+Useful type classes in this case:
+- ~Eq~ for equality between values.
+- ~Enum~ for enumeration of all the values of the type.
+- ~Bounded~ to identify the minimum and maximum value of the type.
+- ~Show~ to have a string representation of the values.
+
+To implement those instances:
+- They can be derived. (ASK: how can we create a type class that can be derived?
+  ~DeriveAnyClasses~ extension? Chapter 12 of the book will give us an answer?)
+- They can be implemented manually (look at minimal requirements of the type
+  class, you don't need to implement all the methods).
+
+#+NAME: antenna-types-derived
+#+BEGIN_SRC haskell :eval never
+:{
+data Direction = North | East | South | West
+  deriving (Eq, Enum, Bounded, Show)
+:}
+
+:{
+data Turn = TNone | TLeft | TRight | TAround
+  deriving (Eq, Enum, Bounded, Show)
+:}
+#+END_SRC
+
+ATTENTION: enumeration cannot cross boundaries, let's solve the problem by
+building an abstraction upon other abstractions.
+
+#+BEGIN_SRC haskell
+<<antenna-types-derived>>
+succ West
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+,*** Exception: succ{Direction}: tried to take `succ' of last tag in enumeration
+CallStack (from HasCallStack):
+  error, called at <interactive>:152:17 in interactive:Ghci59
+#+END_EXAMPLE
+
+#+NAME: cyclic-enumeration
+#+BEGIN_SRC haskell :eval never
+:{
+class (Eq a, Enum a, Bounded a) => CyclicEnum a where
+  cpred :: a -> a
+  cpred x
+    | x == minBound = maxBound
+    | otherwise = pred x
+
+  csucc :: a -> a
+  csucc x
+    | x == maxBound = minBound
+    | otherwise = succ x
+:}
+#+END_SRC
+
+ASK: constraint on the class definition? Is it a bad practice instead of having
+constraint on the instances? I guess is because of the default implementation.
+Is there a way to define a standalone default implementation?
+
+Get the default implementation
+
+#+NAME: antenna-cyclic-enumeration
+#+BEGIN_SRC haskell :eval never
+<<antenna-types-derived>>
+<<cyclic-enumeration>>
+
+instance CyclicEnum Direction
+#+END_SRC
+
+Or derive the instance
+
+#+BEGIN_SRC haskell :eval never
+<<antenna-types-derived>>
+<<cyclic-enumeration>>
+
+:set -XDeriveAnyClass
+:set -XStandaloneDeriving
+
+deriving instance CyclicEnum Direction
+#+END_SRC
+
+Now implementing ~rotate~ is much simpler
+
+#+BEGIN_SRC haskell
+<<antenna-cyclic-enumeration>>
+
+:{
+rotate :: Turn -> Direction -> Direction
+rotate TNone = id
+rotate TRight = csucc
+rotate TLeft = cpred
+rotate TAround = csucc . csucc
+:}
+
+:{
+every :: (Enum a, Bounded a) => [a]
+every = enumFrom minBound
+:}
+
+:{
+orient :: Direction -> Direction -> Turn
+orient d1 d2 = head $ filter ok every
+  where ok t = rotate t d1 == d2
+:}
+
+rotate TRight South
+orient South North
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+West
+TAround
+#+END_EXAMPLE
+
+** Combining turns with Semigroup and Monoid
+
+By using ~Semigroup~ and ~Monoid~ we can combine turns to be more efficient when
+we need to turn the antenna multiple times, combining the turns we can have only
+one final turn to apply to the antenna
+
+#+NAME: antenna-semigroup
+#+BEGIN_SRC haskell :eval never
+<<antenna-cyclic-enumeration>>
+
+:{
+instance Semigroup Turn where
+  TNone <> t = t
+  TLeft <> TRight = TNone
+  TLeft <> TLeft = TAround
+  TLeft <> TAround = TRight
+  TRight <> TRight = TAround
+  TRight <> TAround = TLeft
+  TAround <> TAround = TNone
+  t1 <> t2 = t2 <> t1
+:}
+
+:{
+instance Monoid Turn where
+  mempty = TNone
+:}
+#+END_SRC
+
+How to rotate many times?
+
+#+BEGIN_SRC haskell
+<<antenna-semigroup>>
+
+:{
+rotate :: Turn -> Direction -> Direction
+rotate TNone = id
+rotate TRight = csucc
+rotate TLeft = cpred
+rotate TAround = csucc . csucc
+:}
+
+:{
+rotateMany :: Direction -> [Turn] -> Direction
+rotateMany d ts = rotate (mconcat ts) d
+:}
+
+import Data.Foldable
+
+:{
+rotateMany' :: Direction -> [Turn] -> Direction
+rotateMany' d ts = rotate (fold ts) d
+:}
+
+rotateMany North [TNone, TRight, TRight, TAround]
+rotateMany' North [TNone, TRight, TRight, TAround]
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+North
+North
+#+END_EXAMPLE
+
+** Printing and reading data with Show and Read
+
+As we learned in the previous chapter, to print a representation of our data
+type we can use ~fmt~ library (or another equivalent), we need to provide an
+instance of the ~Buildable~ type class.
+
+#+BEGIN_SRC haskell :eval never
+fmt :: FromBuilder b => Builder -> b
+
+:{
+class FromBuilder a where
+  fromBuilder :: Builder -> a
+:}
+#+END_SRC
+
+~FromBuildable a~ converts any ~Builder~ to an ~a~ if ~a~ has an instance of
+~FromBuildable~ type class. The library provides an instance for ~IO ()~ which
+will print the ~Buildable~ value... clever.
+
+NOTE: ~a ~ () => FromBuilder (IO a)~ with ~~~ which is an [[https://downloads.haskell.org/~ghc/7.8.4/docs/html/users_guide/equality-constraints.html][Equality Constraint]]
+
+ASK: why not directly ~FromBuilder (IO ())~?
+
+Definitions
+- Polymorphic Type :: ~a~
+- Ad-Hoc Polymorphic Type :: ~C a => a~
+
+** Testing functions with Ord and Random
+
+The main entry point for randomness is ~random~ package
+
+~RandomGen~ type class for pure random-number generators.
+
+~StatefulGen~ type class for stateful random-number generators.
+
+~StdGen~ type implements ~RandomGen~ standard random-number generator.
+
+It can generate values for many different types, this ability is implemented via
+~Uniform~ (pick value from whole domain) and ~UniformRange~ (pick value from a
+range in domain) type classes.
+
+#+BEGIN_SRC haskell
+import System.Random
+
+:i uniform
+:i uniformR
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+uniform :: (RandomGen g, Uniform a) => g -> (a, g)
+        -- Defined in ‘System.Random’
+uniformR :: (RandomGen g, UniformRange a) => (a, a) -> g -> (a, g)
+        -- Defined in ‘System.Random’
+#+END_EXAMPLE
+
+Where do we find a ~RandomGen~ like ~StdGen~? in ~IO~ of course
+
+#+BEGIN_SRC haskell
+import System.Random
+
+:i newStdGen
+
+g <- newStdGen
+fst $ uniform g :: Char
+fst $ uniform g :: Char
+
+g <- newStdGen
+(c, g') = uniform g :: (Char, StdGen)
+(c', g'') = uniform g' :: (Char, StdGen)
+c
+c'
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+newStdGen :: Control.Monad.IO.Class.MonadIO m => m StdGen
+        -- Defined in ‘System.Random’
+'\308902'
+'\308902'
+'\445573'
+'\543727'
+#+END_EXAMPLE
+
+General scenario
+- Acquire the random generator from OS
+- Generate values by keeping the generator updated
+
+Random directions
+
+#+NAME: antenna-random
+#+BEGIN_SRC haskell
+import System.Random.Stateful
+<<antenna-types-derived>>
+
+:{
+instance UniformRange Direction where
+  uniformRM (lo, hi) g = do
+    res <- uniformRM (fromEnum lo :: Int, fromEnum hi) g
+    pure $ toEnum res
+:}
+
+:{
+instance Uniform Direction where
+  uniformM g = uniformRM (minBound, maxBound) g
+:}
+
+g <- newStdGen
+fst $ uniform g :: Direction
+#+END_SRC
+
+#+RESULTS: antenna-random
+#+BEGIN_EXAMPLE
+East
+#+END_EXAMPLE
+
+ASK: is constraint ~Random a~ in ~writeRandomFile~ wrong? Why ~Random a~ and not
+~Uniform a~ since he uses ~uniformIO~ which requires ~Uniform a~
+
+* 2.02 Issues with numbers and text
+
+** Computing with fixed precision
+
+Use ~Data.Fixed~ module from ~base~
+
+#+BEGIN_SRC haskell
+import Data.Fixed
+
+x = 1.01 :: Centi
+y = 0.99 :: Centi
+
+pi
+realToFrac pi :: Deci -- because it's a Floating, it cannot be fixed :-)
+3.141592653589793 :: Deci
+3.141592653589793 :: Uni
+x + y
+resolution $ x + y
+:t x + y
+:i Centi
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+3.141592653589793
+pi :: Floating a => a
+3.1
+3.1
+3.0
+2.00
+100
+x + y :: Centi
+type Centi :: *
+type Centi = Fixed E2
+        -- Defined in ‘Data.Fixed’
+#+END_EXAMPLE
+
+** More about Show and Read
+
+The implementation of ~Show~ and ~Read~ must have the following compatibility,
+supported by all the default implementation, (like ~repr~ and ~eval~ for Python)
+
+~(Read v, Show v) => v == read (show v)~
+
+NOTE: ~read~ is not safe, you can use ~readMaybe~ or ~readEither~ from ~Text.Read~
+
+NOTE: most of the time is better not to implement them but to derive them
+
+Alternative ~TextShow~ from ~text-show~ package with ~showb :: TextShow a => a
+-> Builder~ if you want an alternative representation compatible with ~fmt~
+package
+
+** Converting recursive types to strings
+
+~showbPrec~ very convenient
+
+#+BEGIN_SRC haskell :eval never
+:{
+data Expr a = Lit a
+            | Add (Expr a) (Expr a)
+            | Mul (Expr a) (Expr a)
+:}
+
+:{
+instance TextShow a => TextShow (Expr a) where
+  showbPrec p e =
+    case e of
+      Lit a -> showb a
+      Add e1 e2 -> showbHelper p 5 "+" e1 e2
+      Mul e1 e2 -> showbHelper p 6 "*" e1 e2
+    where
+      showbHelper outerP thisP op e1 e2 =
+        showbParen (outerP > thisP) $ shwobPrec thisP e1 <> op <> showbPrec thisP e2
+:}
+#+END_SRC
+
+ASK: what is the initial value of ~p~ in instance of ~TextShow~ for ~Expr a~
+
+* 2.03 Abstracting computations with type classes
+
+- Computational Context
+  - Context = interrelated conditions in which something exists or occurs
+  - Computational Context = interrelated conditions which occurs during the
+    process of computation
+  - They hold a value in a computational context (the ~a~ in ~f a~), the
+    computation is over the value
+  - ~Functor~ mapping
+    - ~<$> :: Functor f => (a -> b) -> f a -> f b~
+  - ~Applicative~ injecting and applying
+    - ~pure :: Applicative f => a -> f a~
+    - ~<*> :: Applicative f => f (a -> b) -> f a -> f b~
+  - ~Monad~ sequencing
+    - ~>>= :: Monad m => m a -> (a -> m b) -> m b~
+    - "Programmable semicolons" :-D :-D :-D
+- Iteration
+  - ~Foldable~
+    - ~foldr :: Foldable t => (a -> b -> b) -> b -> t a -> b~
+    - The king of catamorphisms
+  - ~Traversable~
+    - ~traverse :: (Foldable t, Applicative f) => (a -> f b) -> t a -> f (t b)~
+    - It like mapping but effectfully
+
+** Do notation
+
+Syntactic sugar for
+- Sequencing operations by conveniently writing them one after another as in an
+  imperative programming language
+- Binding values to names with ~<-~
+- Constructing computation with the names bound previously
+
+We can use ~do~ notation in only one context
+
+The first time that I saw this my jaw dropped
+
+#+BEGIN_SRC haskell
+:{
+replicate :: [a] -> [a]
+replicate xs = do
+  x <- xs
+  [x, x]
+:}
+
+replicate [1..5]
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+[1,1,2,2,3,3,4,4,5,5]
+#+END_EXAMPLE
+
+DISCUSS: how you know what's the monad in a ~do~ block?
+
+* Take Away
+- ~DeriveAnyClass~ extension
+- ~StandaloneDeriving~ extension
+- ~Data.Fixed~
+- ~readMaybe~ from ~Text.Read~
+- Type classes
+  - ~Eq~
+  - ~Ord~
+  - ~Enum~
+  - ~Bounded~
+  - ~Semigroup~
+  - ~Monoid~
+  - ~Show~
+  - ~Read~
+  - ~Builder~
+  - ~FromBuilder~
+  - ~RandomGen~
+  - ~StatefulGen~
+  - ~Uniform~
+  - ~UniformRange~
+  - ~Num~
+  - ~Real~
+  - ~Fractional~
+  - ~Integral~
+  - ~Floating~
+  - ~HasResolution~
+  - ~Functor~
+  - ~Applicative~
+  - ~Monad~
+  - ~Foldable~
+  - ~Traversable~
+
+* Exercises
+- Exercises from [[https://wiki.haskell.org/Typeclassopedia][Typeclassopedia]]
+  - ~Functor~
+  - ~Applicative~
+  - ~Monad~
+  - ~MonadFix~ ???
+  - ~Foldable~
+  - ~Traversable~
