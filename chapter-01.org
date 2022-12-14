@@ -263,7 +263,7 @@ Frequent words:
 
 #+END_EXAMPLE
 
-* Highlights
+* Take Away
 - In Haskell we express ideas in types and functions first and then we implement
   them.
 - We can get most of the advantages of functional programming when we use pure
