@@ -28,7 +28,7 @@ guessesMax :: Int
 guessesMax = 6
 
 freshPuzzle :: String -> Puzzle
-freshPuzzle w = Puzzle w (const Nothing <$> w) []
+freshPuzzle w = Puzzle w (Nothing <$ w) []
 
 gameOver :: Puzzle -> Bool
 gameOver p = (gameWon p) || (guessesLeft p) <= 0
@@ -84,5 +84,4 @@ runGame d = do
     _ -> putStrLn "See you space cowboy"
 
 main :: IO ()
-main = do
-  dictionary >>= runGame
+main = dictionary >>= runGame
