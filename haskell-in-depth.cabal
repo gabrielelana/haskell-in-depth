@@ -1,0 +1,41 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.33.0.
+--
+-- see: https://github.com/sol/hpack
+--
+-- hash: db6be7b148672bf94619f6e9f8bfb20821d89daeb233f7a44fed83f0054dee6b
+
+name:           haskell-in-depth
+version:        0.1
+synopsis:       Notes and exercises for the book "Haskell in Depth"
+description:    Sample Code
+category:       Sample Code
+homepage:       https://github.com/gabrielelana/hashell-in-depth#readme
+bug-reports:    https://github.com/gabrielelana/hashell-in-depth/issues
+author:         Gabriele Lana
+maintainer:     Gabriele Lana <gabriele.lana@gmail.com>
+license:        MIT
+build-type:     Simple
+extra-source-files:
+    README.md
+    stack.yaml
+    package.yaml
+    hie.yaml
+    chapter-01.org
+
+source-repository head
+  type: git
+  location: https://github.com/gabrielelana/hashell-in-depth
+
+executable hangman
+  main-is: Main.hs
+  hs-source-dirs:
+      chapter-01/hangman
+  ghc-options: -Wall -Werror -Wcompat -Widentities -Wincomplete-uni-patterns -Wincomplete-record-updates -Wno-unused-top-binds -Wno-orphans
+  build-depends:
+      base >=4.12 && <4.15
+    , fmt
+    , random
+    , transformers
+  default-language: Haskell2010
