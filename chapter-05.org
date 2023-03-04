@@ -1,0 +1,447 @@
+#+TITLE: Monads as Practical Functionality Providers
+
+#+PROPERTY: header-args:haskell :results replace output
+#+PROPERTY: header-args:haskell+ :noweb yes
+#+PROPERTY: header-args:haskell+ :wrap EXAMPLE
+
+- Practical approach to monads
+- Accessing configuration
+- Writing logs
+- Maintaining state
+- Mutability?
+
+* 5.1 Basic Monads in use
+
+** 5.1.1 Maybe Monad
+
+It represent a result of a computation that may potentially have no result
+
+How can we compose several results of such computations? Two strategies
+(Discuss: we can have many more than that)
+
+1. We need all the results to compose them, but if there's one ~Nothing~ return
+   ~Nothing~. (~Monad~ instance of ~Maybe~)
+   #+BEGIN_SRC haskell
+   type Name = String
+   type Phone = String
+   type Location = String
+   type PhoneNumbers = [(Name, Phone)]
+   type Locations = [(Phone, Location)]
+
+   -- Given a Name we want a Location
+   -- Name -> Maybe Phone, Phone -> Maybe Location
+   -- when we get first Nothing we bail out
+
+   :{
+   locateByName :: PhoneNumbers -> Locations -> Name -> Maybe Location
+   locateByName pns ls n = lookup n pns >>= flip lookup ls
+   :}
+   #+END_SRC
+
+   #+RESULTS:
+   #+BEGIN_EXAMPLE
+   #+END_EXAMPLE
+
+2. If we have only one non ~Nothing~ result and that's enough for us.
+   (~Semigroup~ instance of ~Maybe~)
+   #+BEGIN_SRC haskell
+   Just "Foo" <> Nothing
+   Just "Foo" <> Nothing <> Nothing <> Nothing
+   Just "Foo" <> Nothing <> Nothing <> Just "Bar"
+   Just "Foo" <> Nothing <> Nothing <> Just "Bar"
+   "###"
+
+   -- We can have other strategies
+   import Data.Monoid
+
+   getFirst $ First (Just "Foo") <> First (Just "Bar")
+   getLast $ Last (Just "Foo") <> Last (Just "Bar")
+   #+END_SRC
+
+   #+RESULTS:
+   #+BEGIN_EXAMPLE
+   Just "Foo"
+   Just "Foo"
+   Just "FooBar"
+   Just "FooBar"
+   ###
+   Just "Foo"
+   Just "Bar"
+   #+END_EXAMPLE
+
+** 5.1.2 Carrying Configuration with Reader Monad
+
+Look at this monad to get an insight into a general approach for defining our
+own monads or using monads provided by the libraries.
+
+Configuration is generally acquired close to the main function but needed all
+around the code, how do we carry it? Pass it as a function argument to all the
+functions? NO, Global variable? NO
+
+We define a computation with an effect of implicitly passing this information
+around and an ability to access it whenever we like.
+
+NOTE: ~Reader~ is not a monad, ~Reader r~ is (which is ~ReaderT r Identity~,
+because ~Identity~ is)
+
+~class Monad m => MonadReader r m | m -> r where~
+
+The type of configuration should be determined by the type of a monad, this is
+captured by ~| m -> r~ which comes from ~FunctionalDependecies~ whose goal is to
+support type inference by prohibiting wrong instances of the same monad ~m~ with
+different ~r~. ASK: ???
+
+Exercise: try to create a class like ~MonadReader~ without
+~FunctionalDependecies~ and see the result, read more about
+~FunctionalDependecies~
+
+#+BEGIN_SRC haskell
+import Control.Monad.Reader
+
+data Config = Config {verbose :: Bool}
+
+-- type Reader r = ReaderT r Identity
+
+-- newtype ReaderT r m a = ReaderT {runReaderT :: r -> m a}
+
+type ConfigM = Reader Config -- ReaderT Config Identity
+
+-- ConfigM :: * -> *
+-- ConfigM waiting for a type which is the result of the computation
+
+:{
+doSomething :: ConfigM ()
+doSomething = do
+  v <- asks verbose
+  undefined
+:}
+
+:set -XNamedFieldPuns
+
+:{
+doSomethingElse :: ConfigM ()
+doSomethingElse = do
+  Config {verbose} <- ask  -- NameFieldPuns
+  undefined
+:}
+
+-- `RecordWildCards` will bring all field into scope
+-- `NameFieldPuns` will let you bring only the field you are interested in
+
+-- `local` will let you change the configuration
+
+:{
+doSomethingSilently :: ConfigM ()
+doSomethingSilently = local silent doSomething
+  where silent = const Config False
+:}
+
+-- At the end we run it
+
+:{
+main :: IO ()
+main = do
+  return $ runReader doSomething $ Config True
+:}
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+#+END_EXAMPLE
+
+ASK: what if we want to change the type of ~Config~
+
+** 5.1.3 Writing logs with Writer
+
+The opposite problem of ~Reader~ is ~Writer~, we want to be able to write a log
+of what is going on during computations around the program.
+
+~class (Monoid w, Monad m) :: MonadWriter w m | m -> w where~
+
+NOTE: logs must be monoidal
+
+#+BEGIN_SRC haskell
+import Control.Monad.Writer
+
+:i MonadWriter
+"###"
+:i Writer
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+type MonadWriter :: * -> (* -> *) -> Constraint
+class (Monoid w, Monad m) => MonadWriter w m | m -> w where
+  writer :: (a, w) -> m a
+  tell :: w -> m ()
+  listen :: m a -> m (a, w)
+  pass :: m (a, w -> w) -> m a
+  {-# MINIMAL (writer | tell), listen, pass #-}
+        -- Defined in ‘Control.Monad.Writer.Class’
+instance [safe] (Monoid w, Monad m) => MonadWriter w (WriterT w m)
+  -- Defined in ‘Control.Monad.Writer.Class’
+instance [safe] MonadWriter w m => MonadWriter w (ReaderT r m)
+  -- Defined in ‘Control.Monad.Writer.Class’
+instance [safe] Monoid w => MonadWriter w ((,) w)
+  -- Defined in ‘Control.Monad.Writer.Class’
+###
+type Writer :: * -> * -> *
+type Writer w = WriterT w Data.Functor.Identity.Identity :: * -> *
+        -- Defined in ‘Control.Monad.Trans.Writer.Lazy’
+#+END_EXAMPLE
+
+Example: convert a list of line like ~Pen:Bob~ into an SQL insert statement like
+~INSERT INTO items VALUES('Pen', 'Bob')~, if the line is not conforming to the
+expected pattern then report it (with the ~Writer~)
+
+We want to implement ~genSQL :: Text -> Writer [ErrorMessage] SQL~
+
+#+BEGIN_SRC haskell
+:set -XOverloadedStrings
+
+import qualified Data.Text as T
+import Control.Monad.Writer
+
+type SQL = T.Text
+
+data ErrorMessage = WrongFormat Int T.Text deriving Show
+
+instance (Semigroup a, Monoid w) => Semigroup (Writer w a) where
+  l <> r = do
+    (al, wl) <- listen l
+    (ar, wr) <- listen r
+    writer $ (al <> ar, mempty)
+
+instance (Monoid a, Monoid w) => Monoid (Writer w a) where
+  mempty = writer (mempty, mempty)
+
+:{
+insertSQL :: T.Text -> T.Text -> SQL
+insertSQL s1 s2 = "INSERT INTO items VALUES('" <> s1 <> "', '" <> s2 <> "');\n";
+:}
+
+:{
+processLine :: (Int, T.Text) -> Writer [ErrorMessage] SQL
+processLine (i, l) = case T.splitOn ":" l of
+                       [what, who] -> pure $ insertSQL what who
+                       _ -> tell [WrongFormat i l] >> pure mempty
+:}
+
+:{
+getSQL :: T.Text -> Writer [ErrorMessage] SQL
+getSQL txt = foldMap processLine (zip [1..] $ T.lines txt)
+-- The following is the book solution
+-- getSQL txt = T.concat <$> traverse processLine (zip [1..] $ T.lines txt)
+:}
+
+:set -XViewPatterns
+
+-- ViewPatters extension allow calling a function on the argument first
+-- and then mathing a result
+-- uWu *.*
+-- uWu *.*
+-- uWu *.*
+
+:{
+processLine' :: (Int, T.Text) -> Writer [ErrorMessage] SQL
+processLine' (_, T.splitOn ":" -> [what, who]) = pure $ insertSQL what who
+processLine' (i, l) = tell [WrongFormat i l] >> pure mempty
+:}
+
+fst $ runWriter $ getSQL "aaa:bbb\nccc:ddd\nfff\nggg:hhh"
+snd $ runWriter $ getSQL "aaa:bbb\nccc:ddd\nfff\nggg:hhh"
+
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+"INSERT INTO items VALUES('aaa', 'bbb');\nINSERT INTO items VALUES('ccc', 'ddd');\nINSERT INTO items VALUES('ggg', 'hhh');\n"
+[WrongFormat 3 "fff"]
+#+END_EXAMPLE
+
+Example: computing the greatest common divisor in a monadic context. We want to
+know which pairs of number we are getting and how many recursive calls are required
+
+#+BEGIN_SRC haskell
+import Control.Monad.Writer
+
+-- (a -> a -> m ())
+-- is what we do for each step
+
+-- a -> a -> m a
+-- arguments and result of the computation
+
+:{
+gcdM :: (Integral a, Monad m) => (a -> a -> m ()) -> a -> a -> m a
+gcdM step a 0 = step a 0 >> pure a
+gcdM step a b = step a b >> gcdM step b (a `mod` b)
+:}
+
+:{
+logStep :: Integral a => a -> a -> Writer [(a, a)] ()
+logStep a b = tell [(a, b)]
+-- book implementation, why?
+-- gcd_logStep :: Integral a => a -> a -> Writer [(a, a)] a
+-- gcd_logStep = gcdM (\a b -> tell [(a, b)])
+:}
+
+:{
+countStep :: Integral a => a -> a -> Writer (Sum Int) ()
+countStep a b = tell $ Sum 1
+:}
+
+gcdM (\a b -> print (a, b)) 27 36
+runWriter $ gcdM logStep 27 36
+execWriter $ gcdM logStep 27 36
+getSum $ execWriter $ gcdM countStep 27 36
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+(27,36)
+(36,27)
+(27,9)
+(9,0)
+9
+(9,[(27,36),(36,27),(27,9),(9,0)])
+[(27,36),(36,27),(27,9),(9,0)]
+4
+#+END_EXAMPLE
+
+* 5.2 Maintaining state with State Monad
+
+Can we use ~Reader~ and ~Write~ at the same time? Or better mutate state?
+
+#+BEGIN_SRC haskell
+import Control.Monad.State
+:i State
+:i MonadState
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+type State :: * -> * -> *
+type State s = StateT s Data.Functor.Identity.Identity :: * -> *
+        -- Defined in ‘Control.Monad.Trans.State.Lazy’
+type MonadState :: * -> (* -> *) -> Constraint
+class Monad m => MonadState s m | m -> s where
+  get :: m s
+  put :: s -> m ()
+  state :: (s -> (a, s)) -> m a
+  {-# MINIMAL state | get, put #-}
+        -- Defined in ‘Control.Monad.State.Class’
+instance [safe] Monad m => MonadState s (StateT s m)
+  -- Defined in ‘Control.Monad.State.Class’
+#+END_EXAMPLE
+
+#+BEGIN_SRC haskell :eval never
+reader :: MandReader r m = (r -> a) -> m a
+writer :: WriterMonad w m = (a, w) -> m a
+state :: StateMonad s m = (s -> (a, s)) -> m a
+#+END_SRC
+
+#+BEGIN_SRC haskell :eval never
+runReader :: Reader r a => r -> a
+runWriter :: Writer w a => (a, w)
+runState :: State s a => s -> (a, s)
+#+END_SRC
+
+** 5.2.1 Basic examples
+
+#+BEGIN_SRC haskell
+import Control.Monad.State
+import Data.Foldable
+
+:{
+addItem :: Integer -> State Integer ()
+addItem n = modify (n+)
+:}
+
+:{
+sumList :: [Integer] -> State Integer ()
+sumList = traverse_ addItem
+:}
+
+execState (sumList [1..100]) 0
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+5050
+#+END_EXAMPLE
+
+#+BEGIN_SRC haskell
+import Control.Monad.State
+import System.Random.Stateful
+import Data.List
+
+:{
+data Weapon = Rock | Paper | Scissors
+  deriving (Show, Bounded, Enum, Eq)
+:}
+
+:{
+data Winner = First | Second | Draw
+  deriving (Show, Eq, Ord)
+:}
+
+:{
+winner :: (Weapon, Weapon) -> Winner
+winner (Paper, Rock) = First
+winner (Rock, Scissors) = First
+winner (Scissors, Paper) = First
+winner (w1, w2)
+  | w1 == w2 = Draw
+  | otherwise = Second
+:}
+
+:{
+instance UniformRange Weapon where
+  -- NOTE: in the latest version of random
+  -- uniformRM = uniformEnumRM
+  uniformRM (lo, hi) rng = do
+    i <- uniformRM (fromEnum lo :: Int, fromEnum hi) rng
+    pure $ toEnum i
+:}
+
+:{
+instance Uniform Weapon where
+  uniformM rng = uniformRM (minBound, maxBound) rng
+:}
+
+-- rng <- newStdGen
+-- uniform rng :: (Weapon, StdGen)
+
+:{
+randomWeapon :: State StdGen Weapon
+randomWeapon = state uniform
+:}
+
+:{
+gameRound :: State StdGen (Weapon, Weapon)
+gameRound = (,) <$> randomWeapon <*> randomWeapon
+:}
+
+:{
+game :: Int -> State StdGen [(Winner, Int)]
+game n = counts <$> replicateM n (winner <$> gameRound)
+  where counts xs = map headLength $ group $ sort xs
+        headLength xs@(x:_) = (x, length xs)
+:}
+
+g <- newStdGen
+evalState (game 30) g
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+[(First,13),(Second,5),(Draw,12)]
+#+END_EXAMPLE
+
+** 5.2.2 Parsing arithmetic expressions with State
+
+TODO
+
+* 5.3 Other approaches to mutability
+
+TODO
