@@ -17,9 +17,8 @@
 #
 # resolver: ./custom-snapshot.yaml
 # resolver: https://example.com/snapshots/2018-01-01.yaml
-resolver:
-  ghc-8.10.7
-  # url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/lts/18/19.yaml
+# url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/lts/18/19.yaml
+resolver: ghc-8.10.7
 
 # User packages to be built.
 # Various formats can be used as shown in the example below.
@@ -62,6 +61,13 @@ extra-deps:
   - primitive-0.7.4.0@sha256:89b88a3e08493b7727fa4089b0692bfbdf7e1e666ef54635f458644eb8358764,2857
   - random-1.2.1.1@sha256:dea1f11e5569332dc6c8efaad1cb301016a5587b6754943a49f9de08ae0e56d9,6541
   - splitmix-0.1.0.4@sha256:804e2574bc7e32d08cbab91e47ee6287b4df7d50851d73f9e778f94a9a7814c7,6521
+  - utility-ht-0.0.16@sha256:8cae2a7f031783ea49a7057f688236d456a3da98a290090a6954b9dd55679ccd,3115
+  - Only-0.1@sha256:f92f5da97e647451f1ee7f5bf44914fb75062d08ccd3f36b2000d649c63d13aa,1373
+  - attoparsec-0.14.4@sha256:c0569d86c02cadd403017ea414dcb5e4f7de5380de0d8a92b9337cad84cd5e02,5811
+  - text-short-0.1.5@sha256:ebb77383743e214138cf9387875bc7d2665c5584b2e489fe1461240f19e7b53e,3161
+  - unordered-containers-0.2.19.1@sha256:db11042bb0356c0adea277d0794743829125b4c99455af6af2bd5f7bd5e88a39,3797
+  - vector-0.13.0.0@sha256:54528e95501742b99462cc543891f21177e7db34d960ce8e3cbb25afb16a9c89,9112
+  - vector-stream-0.1.0.0@sha256:09b0f8dc4e51936b9d6b04791f0aa03f7c9759b5fb7140eac8a9461cda1e55a3,1404
 
 # Override default flag values for local packages and extra-deps
 # flags: {}

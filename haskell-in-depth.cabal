@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: db6be7b148672bf94619f6e9f8bfb20821d89daeb233f7a44fed83f0054dee6b
+-- hash: 1fa727ab2b8443ae4f0eb0c4fbeb0e967300d5275c03b5202e49a5ebfec0d312
 
 name:           haskell-in-depth
 version:        0.1
@@ -23,6 +23,11 @@ extra-source-files:
     package.yaml
     hie.yaml
     chapter-01.org
+    chapter-02.org
+    chapter-03.org
+    chapter-04.org
+    chapter-05.org
+    chapter-06.org
 
 source-repository head
   type: git
