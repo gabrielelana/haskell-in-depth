@@ -1,0 +1,343 @@
+#+TITLE: Developing an Application
+
+#+PROPERTY: header-args:haskell :results replace output
+#+PROPERTY: header-args:haskell+ :noweb yes
+#+PROPERTY: header-args:haskell+ :wrap EXAMPLE
+
+- Designing a standalone multi-module Haskell program with dependencies
+- Dealing with dates, text (NOTE: he is obsessed) and command-line arguments
+- Parsing CSV files
+- Plotting charts
+- Employing type classes
+
+* 3.01 Setting the Scene
+What the application must do: read historical quotes for some stock company in
+CSV, collect and conveniently represent data in memory, compute statistical
+data, plot chart, prepare HTML report.
+
+NOTE: We can use Haskell in every application domain.
+
+NOTE: We can find Haskell libraries for almost every problem (ASK: is it true?)
+
+How the application will do it:
+1. Process command-line arguments.
+2. Read quote data from CSV file.
+3. Compute statistics.
+4. Plot charts.
+5. Prepare reports on statistical info in text and HTML.
+
+It's a good practice to split the required functionality over several modules:
+1. ~Params~ for command-line arguments.
+2. ~QuoteData~ for describing data types we are going to use throughout the project.
+3. ~StatReport~ for computing statistics and prepare report
+4. ~HtmlReport~ for generating HTML report
+5. ~Charts~ for plotting charts
+
+ASK: I know this is a tough question but, what's the strategy to identify
+modules? Would you have done the same as the author?
+
+Dependencies:
+- ~Main~ -> ~Params~, ~HtmlReport~, ~StatReport~, ~Charts~, ~QuoteData~
+- ~HtmlReport~ <- ~StatReport~, ~QuoteData~
+- ~StatReport~ <- ~QuoteData~
+- ~Charts~ <- ~QuoteData~
+
+Code outline
+
+#+BEGIN_SRC haskell :eval never
+-- Do the work given the command-line parameters
+work :: Params -> IO ()
+-- In the work function we need to
+-- 1. Read the stock quote from CSV file
+readQuotes :: FilePath -> IO QuoteDataCollection
+-- 2. Compute the statistical information
+statInfo :: QuoteDataCollection -> StatInfo
+-- 3. Prepare text report
+textReport :: StatInfo -> String
+-- 4. Plot the chart (simplest way ??? is to generate the file)
+plotChart :: QuoteDataCollection -> IO ()
+-- 5. Generate HTML report
+htmlReport :: QuoteDataCollection -> StatInfo -> HTML
+-- 6. Save HTML report
+saveHtmlReport :: HTML -> IO ()
+#+END_SRC
+
+* 3.02 Exploring design space
+- Parsing command-line arguments: ~optparse-applicative~ package
+- Dealing with time (parse and represent current day for stock quote): ~time~
+  package
+  - [[https://two-wrongs.com/haskell-time-library-tutorial.html][Introduction to time]]
+- Parsing CSV file content: ~cassava~ package
+- Formatting report: ~fmt~ package
+- Formatting report, text tables: ~colonnade~ package
+- Formatting HTML: ~blaze-html~ package
+  - [[https://jaspervdj.be/blaze/tutorial.html][Introduction to blaze]]
+  - [[https://chrisdone.com/posts/lucid/][Introduction to lucid]]
+- Plotting charts: ~Chart~ package
+- Efficient input/output for binary data, required by ~cassava~: ~bytestring~
+  package
+
+* 3.03 Implementation Details
+
+** Parsing CSV
+
+#+NAME: quote-data
+#+BEGIN_SRC haskell :eval never
+data QuoteData = QuoteData {
+                   day :: Day, -- from time package
+                   volume :: Int,
+                   open :: Double,
+                   close :: Double,
+                   high :: Double,
+                   low :: Double
+                 }
+#+END_SRC
+
+To integrate ~cassava~ and ~time~ with our code, we need to implement the
+following type classes:
+- ~Generic~ from ~GHC.Generics~ to allow ~cassava~ to work with our data type
+  ~QuoteData~.
+- ~FromNamedRecord~ to allow ~cassava~ to read a CSV file with named fields and
+  map data to the record fields (by matching field name in data file and field
+  name in data structure) (ASK: is because of this that he needs ~Generic~?).
+- ~FromField~ to teach ~cassava~ how to parse ~Day~ values.
+
+#+BEGIN_SRC haskell :eval never
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE StandaloneDeriving #-}
+
+deriving instance Generic QuoteData
+deriving instance Generic FromNamedRecord
+#+END_SRC
+
+We need to teach ~cassava~ how to parse ~Day~ values defined by ~time~ package,
+we will do that by implementing the following type class from ~cassava~ for ~Day~
+
+#+BEGIN_SRC haskell :eval never
+class FromField a where
+  parseField :: Field -> Parser a
+#+END_SRC
+
+NOTE: how can we create a ~Parser Day~ since ~Parser~ is from ~cassava~? Because
+~Parser~ implements ~Monad~ (in particular ~MonadFail~), ~parseTimeM~ from
+~time~ will return a ~MonadFail~ of anything that implements ~ParseTime~ and
+~Day~ does
+
+#+BEGIN_SRC haskell
+import Data.Csv
+import Data.Time
+import Data.ByteString.Char8 (unpack, pack)
+
+:{
+instance FromField Day where
+  parseField = parseTimeM True defaultTimeLocale "%Y-%m-%d" . unpack
+:}
+
+:{
+day :: Either String Day
+day = runParser $ parseField $ pack "2019-05-01"
+:}
+
+:t parseTimeM
+day
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+parseTimeM
+  :: (MonadFail m, ParseTime t) =>
+     Bool -> TimeLocale -> String -> String -> m t
+Right 2019-05-01
+#+END_EXAMPLE
+
+** Compute Statistics
+
+#+BEGIN_SRC haskell :results none
+<<quote-data>>
+
+:{
+data QField = Open | Close | High | Low | Volume
+  deriving (Eq, Ord, Show, Enum, Bounded)
+:}
+
+:{
+field2value :: QField -> QuoteData -> Double
+field2value Open = open
+field2value Close = close
+field2value High = high
+field2value Low = low
+field2value Volume = fromIntegral . volume
+:}
+#+END_SRC
+
+NOTE: cool, it's like a switch, but I didn't understand why since you can
+compute the needed values for ~Int~ and ~Double~ and you don't have to mix them.
+I looked at the code and it seems like this is needed because the function that
+compute statistics for a field is one and works with ~Double~ (see ~StatValue~
+[[https://github.com/bravit/hid-examples/blob/61bad27de441d05713a2d1000be4697a23e72f8e/stockquotes/StatReport.hs#L17][here]] and [[https://github.com/bravit/hid-examples/blob/61bad27de441d05713a2d1000be4697a23e72f8e/stockquotes/StatReport.hs#L42][here]])
+
+** Plotting Charts
+
+NOTE: big idea, define a chart with composable data structure which you can
+build purely and then at the end transform it into its graphical representation.
+
+NOTE: use of ~RecordWildCard~ language extension to bring all the fields of a
+record in the current scope
+
+#+BEGIN_SRC haskell :results none
+<<quote-data>>
+
+:set -XRecordWildCards
+
+:{
+isRising :: QuoteData -> Bool
+isRising QuoteData {..} = close > open
+:}
+
+:{
+emptyQuoteData :: Day -> QuoteData
+emptyQuoteData day = let close = 0
+                         open = 0
+                         high = 0
+                         low = 0
+                         volume = 0
+                     in QuoteData {..}
+:}
+#+END_SRC
+
+NOTE: cool, lenses and default value
+
+#+BEGIN_SRC haskell :eval never
+chart = slayouts_layouts .~ -- lens setter on the left, value on the right
+  [ StackedLayout candlesLayout,
+    StackedLayout volumesLayout
+  ]
+  $ def -- lens target, `def` from `data-default-class` is the default value
+#+END_SRC
+
+** Compute Statistics
+
+Data type to hold statistic values. NOTE: ~StatValue~ contains number of
+significant decimal number needed for formatting the values. Mixing computation
+with representation? For now it's simpler this way. Is there a way to deal with
+global configuration values?
+
+#+BEGIN_SRC haskell :eval never
+data StatEntry = StatEntry {
+  qfield :: QField,
+  meanValue :: StatValue,
+  minValue :: StatValue,
+  maxValue :: StatValue,
+  daysBetween :: Int
+}
+#+END_SRC
+
+** Prepare Reports
+
+Make our two data types ~Buildable~ to work with ~fmt~
+
+#+BEGIN_SRC haskell :eval never
+instance Buildable StatValue where
+  build sv = fixedF (decimalPlaces sv) (value sv)
+
+instance Buildable StatEntry where
+  build StatEntry {..} =
+           ""+||qfield||+": "
+             +|meanVal|+" (mean), "
+             +|minVal|+" (min), "
+             +|maxVal|+" (max), "
+             +|daysBetweenMinMax|+" (days)"
+#+END_SRC
+
+How to use ~blaze-html~ to compose the final HTML. NOTE: ~Html~ type is monad
+(~type Html = MarkupM ()~), therefore you can use do notation to build it "more
+naturally"
+
+#+BEGIN_SRC haskell :eval never
+htmlReport :: (Functor t, Foldable t) => String ->
+                                         t QuoteData ->
+                                         [StatEntry] ->
+                                         [FilePath] ->
+                                         ByteString
+htmlReport docTitle quotes statEntries images = renderHtml $ docTypeHtml $ do
+     H.head $ do
+       title $ string docTitle
+       style tableStyle
+     body $ do
+       unless (null images) $ do
+         h1 "Charts"
+         traverse_ ((img!) . src . toValue) images
+
+       h1 "Statistics Report"
+       encodeHtmlTable mempty colStats statEntries
+
+       h1 "Stock Quotes Data"
+       encodeHtmlTable mempty colData quotes
+  where
+    tableStyle = "table {border-collapse: collapse}" <>
+            "td, th {border: 1px solid black; padding: 5px}"
+#+END_SRC
+
+NOTE: the following code
+
+#+BEGIN_SRC haskell :eval never
+traverse_ ((img!) . src . toValue) images
+#+END_SRC
+
+ASK: why ~traverse_~ if ~Html~ is already a ~MarkupM ()~, ~traverse~ would have
+worked the same
+
+#+BEGIN_SRC haskell :eval never
+(img!) . src . toValue :: ToValue a => a -> Html -- MarkupM ()
+#+END_SRC
+
+** Parsing Command-Line Arguments
+
+Applicative style parsing of command line
+
+#+BEGIN_SRC haskell :eval never
+data Params = Params {
+                fname :: FilePath
+              , company :: Maybe Text
+              , chart :: Bool
+              , htmlFile :: Maybe FilePath
+              , silent :: Bool
+              }
+
+-- strOption :: IsString s => Mod OptionFields s -> Parser s
+-- This is why it can give you a `Text` in the end
+
+mkParams :: Parser Params
+mkParams =
+  Params <$>
+             strArgument
+               (metavar "FILE" <> help "CSV file name")
+         <*> optional (strip <$> strOption
+               (long "name" <> short 'n' <>
+                help "Company name "))
+         <*> switch
+               (long "chart" <> short 'c' <>
+                help "Generate chart")
+         <*> optional (strOption $
+               long "html" <> metavar "FILE" <>
+               help "Generate HTML report")
+         <*> switch
+               (long "silent" <> short 's' <>
+                help "Don't print statistics")
+#+END_SRC
+
+* Take Away
+
+- The following are you friends in practice
+  - ~Monad~ (in ~Html~ building)
+  - ~Applicative~ (in command line option parsing)
+  - ~Functor~ (everywhere :-D)
+  - ~Foldable~ (statistics are computed over a foldable structure, ~Vector~ in the end)
+  - ~Monoid~ (~Html.Attribute~ implements monoid, everywhere :-D)
+- You can use Haskell for everything! DISCUSS: is it true?
+
+* Exercises
+
+- [[https://github.com/mtuchkova/coding-challenge-csv-master][eBay coding challenge]]
+- [[https://realpython.com/python-interview-problem-parsing-csv-files/#python-csv-parsing-weather-data][python csv challenge]]
