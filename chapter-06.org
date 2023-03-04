@@ -1,0 +1,641 @@
+#+TITLE: Structuring Programs with Monad Transformers
+
+#+PROPERTY: header-args:haskell :results replace output
+#+PROPERTY: header-args:haskell+ :noweb yes
+#+PROPERTY: header-args:haskell+ :wrap EXAMPLE
+
+- Extend monad functionality with monad transformers
+- Describing an application structure with monad stacks
+- Define monad transformers
+- Overview of the most common monad transformers
+
+* 6.1 The problem of combining monads
+
+Evaluate an expression in reverse Polish notation like "2 3 +". The algorithm is
+stack based and it's the following:
+
+- If it's a number push into the stack
+- If it's an operator
+  - Pop two numbers from the stack
+  - Apply the operator
+  - Push the result back onto the stack
+- At the end you should have one value into the stack, this is the result
+
+#+BEGIN_SRC haskell
+import Control.Monad.State
+
+type Stack = [Integer]
+type EvalM = State Stack
+
+:{
+push :: Integer -> EvalM ()
+push x = modify (x:)
+:}
+
+:{
+pop :: EvalM Integer
+pop = do
+  xs <- get
+  put $ tail xs
+  pure $ head xs
+:}
+
+:{
+evalRPN :: String -> Integer
+evalRPN exp = evalState (traverse step (words exp) >> pop) []
+  where step :: String -> EvalM ()
+        step "+" = evalOP (+)
+        step "-" = evalOP (-)
+        step "*" = evalOP (*)
+        step n = push $ read n
+        evalOP op = flip op <$> pop <*> pop >>= push
+:}
+
+evalRPN "2 3 +"
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+5
+#+END_EXAMPLE
+
+We are not considering the following possible errors:
+- Not enough element on stack on ~pop~
+- In ~step~, ~read~ can fail
+- At the end we can have more elements on the stack
+
+** First attempt: use Maybe Monad
+
+We use ~StateT~ monad transformer: adds the functionality of the ~State~ monad
+with the ~Stack~ as a state and to the ~Maybe~ monad.
+
+- ~Maybe~ monad is called the /base/ or /inner/ monad
+- We add the ~State Stack~ on top of it
+- Forming the /monad stack/
+
+#+BEGIN_SRC haskell
+import Control.Monad.State
+import Control.Applicative
+import Text.Read (readMaybe)
+
+type Stack = [Integer]
+type EvalM = StateT Stack Maybe
+
+:{
+push :: Integer -> EvalM ()
+push x = modify (x:)
+:}
+
+-- How do we put the possible Nothing produced while popping from the stack?
+:t lift
+:t when
+
+:{
+pop :: EvalM Integer
+pop = do
+  xs <- get
+  when (null xs) $ lift Nothing -- ASK: how can `when` work with `f ()`???
+  put $ tail xs
+  pure $ head xs
+:}
+
+-- Second solution is to use `guard` when `m` implements `Alternative`
+:t guard
+
+-- ASK: again with the `f ()` ???
+
+-- Third solution is to rely on the fact that when in do notation you
+-- patter match and the patter fails when desugaring GHC introduce a `fail`
+-- call from `MonadFail` and `fail` for `Maybe` produces `Nothing` which
+-- is what we want
+--
+-- pop = do
+--   (x:xs) <- get
+--   put xs
+--   pure x
+
+:t evalStateT
+
+evalStateT pop []
+evalStateT (push 10 >> pop) []
+
+:{
+popOnly :: EvalM Integer
+popOnly = do
+  xs <- get
+  when (length xs /= 1) $ lift Nothing
+  pure $ head xs
+:}
+
+-- ASK: (readSafe s) :: m Integer, it works because StateT s m a implements Alternative ?
+
+:{
+readSafe :: (Read a, Alternative m) => String -> m a
+readSafe s =
+  case readMaybe s of
+    Nothing -> empty
+    Just n -> pure n
+:}
+
+-- ASK: will be the same with MonadFail?
+-- readSafe :: (Read a, MonadFail m) => String -> m a
+-- readSafe s =
+--   case readMaybe s of
+--     Nothing -> fail "Unable to parse"
+--     Just n -> pure n
+
+:{
+evalRPN :: String -> Maybe Integer
+evalRPN exp = evalStateT ((traverse step (words exp)) >> popOnly) []
+  where step :: String -> EvalM ()
+        step "+" = stepOP (+)
+        step "-" = stepOP (-)
+        step "*" = stepOP (*)
+        step s = readSafe s >>= push
+        stepOP op = flip op <$> pop <*> pop >>= push
+:}
+
+evalRPN "5 4 +"
+evalRPN "5 4 5 +"
+evalRPN "5 foo +"
+evalRPN "hello"
+evalRPN "4"
+evalRPN "4 5"
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+lift :: (MonadTrans t, Monad m) => m a -> t m a
+when :: Applicative f => Bool -> f () -> f ()
+guard :: Alternative f => Bool -> f ()
+evalStateT :: Monad m => StateT s m a -> s -> m a
+Nothing
+Just 10
+Just 9
+Nothing
+Nothing
+Nothing
+Just 4
+Nothing
+#+END_EXAMPLE
+
+* 6.2 IO based monad transformer stacks
+
+If we need the functionality of several monads at once, it a job for /monad
+transformers/.
+
+An application is a monad stack built from a base monad with added various
+monadic functionality via /monad transformers/.
+
+A /monad stack/ is a /monad/ too but it's rich in functionality provided.
+
+Suppose we want to replicate the functionality of ~du~ command line utility, we
+need an accessible configuration, we need to write logs, have a state and
+perform IO operations.
+
+#+BEGIN_SRC haskell :eval never
+import Control.Monad.RWS
+
+data AppConfig = AppConfig {
+    basePath :: FilePath
+  , maxDepth :: Int
+  , extension :: Maybe String -- extensions to filter
+  , followSymlinks :: Bool
+  }
+
+-- built from AppConfig
+data AppEnv = AppEnv {
+    cfg :: AppConfig
+  , path :: FilePath
+  , depth :: Int
+  , fileStatus :: FilePath  -> IO FileStatus
+}
+
+initialEnv :: AppConfig -> AppEnv
+initialEnv config @ AppConfig {..} = AppEnv {
+    cfg = config
+  , path = basePath -- ASK: why duplicate?
+  , depth = 0       -- ASK: why do not use config.maxDepth?
+  , fileStatus = if followSymlinks
+                 then getFileStatus
+                 else getSymlinkStatus
+  }
+
+-- l: is the type of single log
+-- s: is the type of the state
+-- everything over IO
+-- kind of MyApp is (* -> *) still missing the result of the computation
+type MyApp l s = RWST AppEnv [l] s IO
+
+-- a: is the result of the computation
+runMyApp :: MyApp l s a -> AppConfig -> s -> IO (a, [logEntry])
+runMyApp app config state = evalRWST app (initialEnv config) state
+#+END_SRC
+
+** Check current file status
+
+#+BEGIN_SRC haskell :eval never
+-- DISCUSS: it still feels like magic to describe a computation without having
+-- parameters
+
+currentPathStatus :: MyApp l s FileStatus -- `l` and `s` left unspecified
+currentPathStatus = do
+  AppEnv {fileStatus, path} <- ask -- consult the environment via Reader
+  liftIO $ fileStatus path -- runs IO action
+#+END_SRC
+
+~liftIO~ runs an IO action in any monad stack based on the ~IO~ monad.
+
+** Traversing a directory
+
+#+BEGIN_SRC haskell :eval never
+traverseDirectoryWith :: MyApp l s () -> MyApp l s ()
+traverseDirectoryWith app = do
+  currentPath <- asks path -- same as `AppEnv {path} <- ask`
+  files <- liftIO $ listDirectory currentPath -- list the directory content
+  traverse_ go files                          -- traverse over every file in directory
+    where
+      go file = flip local app $ \env ->
+        env { path = path env </> file,
+              depth = depth env + 1
+            }
+#+END_SRC
+
+NOTE: this function traverse only one level of sub-directories. It doesn't
+attempt to go deeper, because that is a task of the concrete application (ASK:
+what does it mean with /concrete application/??? ANSWER: it means that as of
+right now we only implemented machinery/infrastructure, nothing of the
+application's business logic)
+
+** Walking over the directory tree
+
+We are ready to implement the first concrete application: walk over the
+directory tree and collect information about sub-directory depths
+
+#+BEGIN_SRC haskell :eval never
+dirTree :: MyApp (FilePath, Int) s () -- (FilePath, Int) is the type of the log entry
+dirTree = do
+  AppEnv {..} <- ask -- take out the whole environment
+  fileStatus <- currentPathStatus
+  when (isDirectory fileStatus && depth <= maxDepth cfg) $ do
+    tell [(takeBaseName path, depth)] -- logs the current directory name and depth
+    traverseDirectoryWith dirTree     -- traverse the subdirectory recursively
+#+END_SRC
+
+** Counting files in directories
+
+#+BEGIN_SRC haskell :eval never
+checkExtension :: AppConfig -> FilePath -> Bool
+checkExtension AppConfig {extension} path =
+  maybe True (`isExtensionOf` path) extension
+
+fileCount :: MyApp (FilePath, Int) s ()
+fileCount = do
+  AppEnv {..} <- ask
+  fileStatus <- currentPathStatus
+  when (isDirectory fileStatus && depth <= maxDepth cfg) $ do
+    traverseDirectoryWith fileCount -- ASK: why now and not after? Is there a reason?
+    files <- liftIO $ listFiles path -- listFiles in System.Directory.Extra
+    tell [(path, length $ filter (checkExtension cfg) files)]
+#+END_SRC
+
+** Computing disk space usage
+
+#+BEGIN_SRC haskell :eval never
+-- FileOffset is the type used for the file size from System.Posix.Types
+
+-- What should we do with an entry?
+data EntryAction = TraverseDir {dirPath :: FilePath, requireReporting :: Bool}
+                 | RecordFileSize {fsize :: FileOffset}
+                 | None
+
+diskUsage :: MyApp (FilePath, FileOffset) FileOffset ()
+diskUsage = liftM2 decide ask currentPathStatus >>= processEntry
+  where
+    decide AppEnv {..} fs
+      | isDirectory fs = TraverseDir path (depth <= maxDepth cfg)
+      | isRegularFile fs = RecordFileSize (fileSize fs)
+      | otherwise = None
+
+    processEntry TraverseDir {..} = do
+      usageOnEntry <- get -- take the current disk usage from state before entry
+      traverseDirectoryWith diskUsage
+      when requiredReporting $ do
+        usageOnExit <- get -- take the current disk usage from state after traversing directory
+        tell [(dirpath, usageOnExit - usageOnEntry)] -- log space used by the current directory
+    processEntry RecordFileSize {fsize} = modify (+fsize)
+    processEntry None = pure ()
+#+END_SRC
+
+** Can we do it without RWST?
+
+#+BEGIN_SRC haskell :eval never
+newtype MyApp l s a = MyApp {
+  runApp :: ReaderT AppEnv
+              (WriterT [l]
+                (StateT s IO)
+              )
+            a
+  } deriving (Functor,
+              Applicative,
+              Monad,
+              MonadIO,
+              MonadReader AppEnv,
+              MonadWriter [l],
+              MonadState s)
+#+END_SRC
+
+The ~deriving~ machinery will implement the needed functions (e.g. ~tell~) by
+lifting the original implementation (~tell~) an appropriate number of times to
+reach the corresponding monad in the stack (~lift . tell~)
+
+ASK: why not ~lift tell~
+
+#+BEGIN_SRC haskell
+import qualified Control.Monad.Trans.Writer as W
+import qualified Control.Monad.Trans.State as S
+
+:t W.tell
+:t lift
+:t lift . W.tell
+:t lift W.tell
+:t S.get
+:t lift S.get
+:t lift . S.get -- Wrong
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+W.tell :: Monad m => w -> WriterT w m ()
+lift :: (MonadTrans t, Monad m) => m a -> t m a
+lift . W.tell
+  :: (MonadTrans t, Monoid w, Monad m) => w -> t (WriterT w m) ()
+lift W.tell
+  :: (MonadTrans t, Monad m) => t ((->) w) (WriterT w m ())
+S.get :: Monad m => StateT s m s
+lift S.get :: (MonadTrans t, Monad m) => t (StateT a m) a
+<interactive>:1:8: error:
+    • Couldn't match expected type ‘a -> m a1’
+                  with actual type ‘StateT s0 m0 s0’
+    • In the second argument of ‘(.)’, namely
+        ‘Control.Monad.Trans.State.get’
+      In the expression: lift . Control.Monad.Trans.State.get
+#+END_EXAMPLE
+
+* 6.3 What is a monad transformer?
+
+We expect two things from a monad transformer:
+- It should implement ~Monad~
+- It should give us a way to use the features of both monads (e.g. the base
+  monad and the one we intend to stack on top of it)
+
+We will define a ~MaybeT~ transformer and build a monad over the ~State~ monad.
+
+ASK: How do you decide in what order to put monads, why ~m (Maybe a)~ and not
+~Maybe (m a)~
+
+** Step 0: define the type
+
+#+NAME: step-0
+#+BEGIN_SRC haskell
+newtype MaybeT m a = MaybeT { runMaybeT :: m (Maybe a) }
+#+END_SRC
+
+** Step 1: turning a monad stack into a Monad
+
+#+NAME: step-1
+#+BEGIN_SRC haskell
+<<step-0>>
+
+:set -XInstanceSigs
+
+:{
+instance Functor m => Functor (MaybeT m) where
+  fmap f (MaybeT x) = MaybeT $ (fmap . fmap) f x
+:}
+#+END_SRC
+
+** Step 2: make it an Applicative
+
+#+NAME: step-2
+#+BEGIN_SRC haskell
+<<step-1>>
+
+:{
+instance Applicative m => Applicative (MaybeT m) where
+  pure = MaybeT . (pure . pure)
+  (MaybeT mf) <*> (MaybeT mx) = MaybeT $ liftA2 (<*>) mf mx
+:}
+#+END_SRC
+
+** Step 3: make it a Monad
+
+#+NAME: step-3
+#+BEGIN_SRC haskell
+<<step-2>>
+
+:{
+instance Monad m => Monad (MaybeT m) where
+  return = pure
+  (MaybeT ma) >>= f = MaybeT $ ma >>= \x -> case x of
+                                              Just y -> runMaybeT (f y)
+                                              Nothing -> pure Nothing
+:}
+#+END_SRC
+
+** Step 4: implement full monad stack functionality
+
+- We should be able to go up down the with lift
+- We should allow automatic lifting to avoid bothering the user
+
+Function ~lift~ is defined by ~MonadTrans~ type class in ~Control.Monad.Trans~
+
+#+BEGIN_SRC haskell
+import Control.Monad.Trans
+
+:i MonadTrans
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+type MonadTrans :: ((* -> *) -> * -> *) -> Constraint
+class MonadTrans t where
+  lift :: Monad m => m a -> t m a
+  {-# MINIMAL lift #-}
+        -- Defined in ‘Control.Monad.Trans.Class’
+instance [safe] MonadTrans (ReaderT r)
+  -- Defined in ‘Control.Monad.Trans.Reader’
+instance [safe] Monoid w => MonadTrans (WriterT w)
+  -- Defined in ‘Control.Monad.Trans.Writer.Lazy’
+instance [safe] MonadTrans (StateT s)
+  -- Defined in ‘Control.Monad.Trans.State.Lazy’
+#+END_EXAMPLE
+
+#+NAME: step-4
+#+BEGIN_SRC haskell
+<<step-3>>
+
+import Control.Monad.Trans
+
+:{
+instance MonadTrans MaybeT where
+  lift ma = MaybeT $ Just <$> ma
+:}
+#+END_SRC
+
+** Step 5: lift specific interfaces
+
+With ~lift~ you need to know where in the stack a specific monad is, to avoid
+that and gain flexibility and be resilient to change, we can implement specific
+type classes which provide specific functionalities.
+
+E.g. ~MonadState~ will provide the ~state~ facility, we could state that if the
+monad ~m~ that we are stacking in ~MaybeT m~ implements ~MonadState~ the we will
+implement ~MonadState~ and therefore giving directly access to ~state~
+functionality to the user without explicitly lifting.
+
+#+NAME: step-5
+#+BEGIN_SRC haskell
+<<step-4>>
+
+import qualified Control.Monad.State as MS
+:set -XFlexibleInstances
+:set -XMultiParamTypeClasses
+:set -XUndecidableInstances
+
+:{
+instance MS.MonadState s m => MS.MonadState s (MaybeT m) where
+  state = lift . MS.state
+:}
+#+END_SRC
+
+** Step 6: supply additional functionality
+
+Some monad provide additional functionality, so monad transformers should
+provide them too (ASK: wait, this means that for every possible monad we need to
+implement their specific type class? We cannot add them later right?)
+
+Given we are adding to the stack ~Maybe~ the additional functionalities are:
+- ~MonadFail~ since we have ~Nothing~ to signal failure
+- ~Alternative~ and ~MonadPlus~ using monoid operations for ~Maybe a~
+- Allow ~IO~ as base class via ~MonadIO~
+
+#+NAME: step-6
+#+BEGIN_SRC haskell
+<<step-5>>
+
+-- fail :: String -> MaybeT m a
+:{
+instance Monad m => MonadFail (MaybeT m) where
+  fail _ = MaybeT $ pure Nothing
+:}
+
+-- empty :: MaybeT m a
+-- (<|>) :: MaybeT m a -> MaybeT m a -> MaybeT m a
+:{
+instance Applicative m => Alternative (MaybeT m) where
+  empty = MaybeT $ pure empty -- pure for m, empty for Maybe
+  (MaybeT mx) <|> (MaybeT my) = MaybeT $ liftA2 (<|>) mx my
+:}
+
+-- liftIO :: IO a -> MaybeT m a
+:{
+instance MonadIO m => MonadIO (MaybeT m) where
+  liftIO = lift . liftIO
+:}
+#+END_SRC
+
+** Using a transformer
+
+We will use now ~MaybeT~ to evaluate the RPN expression, it should work with
+only minor modifications
+
+#+BEGIN_SRC haskell
+<<step-6>>
+
+import Control.Applicative
+import Control.Monad.State
+import Text.Read (readMaybe)
+
+type Stack = [Integer]
+type EvalM = MaybeT (State Stack)
+
+:{
+push :: Integer -> EvalM ()
+push x = modify (x:)
+:}
+
+:{
+pop :: EvalM Integer
+pop = do
+  xs <- get
+  when (null xs) $ fail "nothing to pop"
+  put $ tail xs
+  pure $ head xs
+:}
+
+:{
+popOnly :: EvalM Integer
+popOnly = do
+  xs <- get
+  when (length xs /= 1) $ fail "more then on thing to pop"
+  pure $ head xs
+:}
+
+:{
+readSafe :: (Read a, Alternative m) => String -> m a
+readSafe s =
+  case readMaybe s of
+    Nothing -> empty
+    Just n -> pure n
+:}
+
+:{
+evalRPN :: String -> Maybe Integer
+evalRPN exp = evalState (runMaybeT ((traverse step (words exp)) >> popOnly)) []
+  where step :: String -> EvalM ()
+        step "+" = stepOP (+)
+        step "-" = stepOP (-)
+        step "*" = stepOP (*)
+        step s = readSafe s >>= push
+        stepOP op = flip op <$> pop <*> pop >>= push
+:}
+
+evalRPN "2 5 +"
+evalRPN "2 5"
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+Just 7
+Nothing
+#+END_EXAMPLE
+
+* 6.4 Monad transformers in the Haskell libraries
+
+Reference libraries are ~transofrmers~ and ~mtl~
+
+Most common monad transformers:
+- ~AccumT~: accumulates values + ability to read.
+- ~ExceptT~: exits a computation by generating exceptions with full information
+  about the current context.
+- ~MaybeT~: exits a computation without production a result.
+- ~ReaderT~: reads a read-only environment.
+- ~StateT~: reads/writes a state value.
+- ~WriterT~: logs data appending an element to a monoid
+- ~RWST~: combines ~ReaderT~, ~WriterT~ and ~StateT~
+
+* Follow-Up
+
+- [[http://web.cecs.pdx.edu/~mpj/pubs/springschool.html][Functional Programming with Overloading and Higher-Order Polymorphism]]
+- https://wiki.haskell.org/Monad_Transformers_Explained
+- https://wiki.haskell.org/Monad_Transformers_Tutorial
+- https://en.wikibooks.org/wiki/Haskell/Monad_transformers
+- https://web.archive.org/web/20200709185916/https://page.mi.fu-berlin.de/scravy/realworldhaskell/materialien/monad-transformers-step-by-step.pdf
+- https://www.haskellforall.com/2012/12/the-continuation-monad.html
+
+* Exercises
+
+- https://github.com/system-f/fp-course/blob/master/src/Course/StateT.hs
+- https://www.fpcomplete.com/haskell/tutorial/monad-transformers/
+- https://proglang.informatik.uni-freiburg.de/teaching/functional-programming/2017/exercises/ex7.pdf
