@@ -1,11 +1,12 @@
+{-# LANGUAGE StrictData #-}
 module Lib (parseExp, evalExp, Exp (..)) where
 
 import Prelude hiding (lex, exp)
 import Text.ParserCombinators.Parsec
 
-data Exp a = Lit a
-           | Add (Exp a) (Exp a)
-           | Mul (Exp a) (Exp a)
+data Exp a = Lit !a
+           | Add !(Exp a) !(Exp a)
+           | Mul !(Exp a) !(Exp a)
            deriving (Show, Eq)
 
 lex :: Parser a -> Parser a
