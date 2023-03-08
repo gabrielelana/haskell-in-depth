@@ -1,0 +1,626 @@
+#+TITLE: Error handling and logging
+
+#+PROPERTY: header-args:haskell :results replace output
+#+PROPERTY: header-args:haskell+ :noweb yes
+#+PROPERTY: header-args:haskell+ :wrap EXAMPLE
+
+- Exceptions and when to use them.
+- Several exception handling mechanisms.
+- Design exception handling in pure/impure code.
+
+Real world is unforgiving: a file could not exists, a network connection may
+break, a memory allocation can fail... You cannot check everything in advance,
+shit happens, how should we react?
+
+* 7.1 Overview of error-handling mechanisms in Haskell
+Exceptions in Haskell are complicated because there are several distinct
+exception handling mechanisms to choose from.
+
+Classes of exceptions
+- Programmable exceptions :: Exceptions implemented as library.
+- Extensible exceptions :: Exceptions supported by GHC runtime system.
+
+An exception is a way to escape regular control flow in a program.
+
+This gets complicated in Haskell because:
+- Purity and laziness makes execution flow hard to predict and so exception
+  handling.
+- We need to be especially careful when we acquire resources that need to be
+  released.
+- Concurrency brings even more complications in execution flow prediction.
+
+An exception handling mechanism should provide:
+- A representation of an exceptional situation as a value of some type.
+- The means to throw and catch such exception.
+- To run an action whether or not an exception was thrown.
+- BONUS: guidelines on when and how such mechanism should be used.
+
+RULE: if we can avoid to use exceptions at all, we should avoid using them.
+
+#+BEGIN_QUOTE
+To protect you from programmer mistakes (like division by zeros) enable the
+compiler warnings
+
+Consider to use the following compilation flags in command line or via
+~ghc-option~ field: ~-fwarn-incomplete-patterns~, ~-Wall~, ~-Weverything~
+#+END_QUOTE
+
+RULE: Always be ready to handle runtime exceptions, no matter the amount of
+purity of the code, memory allocation failure or OS meddling is always possible.
+
+Guidelines:
+
+1. We strive to avoid dealing with exceptions by strict programming discipline
+   (types, tests, compiler warnings, ...)
+2. We use programmable exceptions (~Maybe~, ~Either~, ~ExceptT~, ...) for the
+   most part.
+3. We use GHC runtime exceptions for communicating with the real world (~IO~) by
+   throwing and handling them in judicious places.
+4. We use GHC runtime exceptions to log any exceptional situations that were not
+   handled by other means (bugs)
+
+* 7.2 Programmable exception in monad stacks
+To handle programmable exceptions we can use ~ExceptT~ monad transformer
+provided by ~Control.Monad.Except~ module from ~mtl~ package.
+
+Has the ability to throw errors and suppress execution until errors are handled
+or a computation is completed. An interface for this error handling mechanism is
+defined by the ~MonadError~ type class
+
+#+BEGIN_SRC haskell :eval never
+class Monad m => MonadError e m | m -> e where
+  throwError :: e -> m a
+  catchError :: m a -> (e -> m a) -> m a
+
+runExceptT :: ExceptT e m a -> m (Either e a)
+#+END_SRC
+
+With ~catchError~ you can handle the exception ~e~ by returning something
+meaningful ~m a~ or you can throw the exception again with ~throwError~ given
+the fact that the result is always ~m a~.
+
+** Evaluating RPN expressions
+- We want to evaluate a list of expressions all at once.
+- We want to have variables in our expressions (given by a ~Reader~ accessible
+  environment).
+- We want to get a clear indication of what's wrong with an expression.
+
+#+NAME: rpn-01
+#+BEGIN_SRC haskell :results none
+import qualified Data.Text as T
+
+-- To hold values while evaluating an expression
+type Stack = [Integer]
+-- To hold variables and their value
+type Variables = [(T.Text, Integer)]
+#+END_SRC
+
+What could go wrong while evaluating an expression?
+- Not enough values on the stack
+- More than one value at the end on the stack
+- Use of unknown variable
+- When something should be a number but it's not
+
+Then we define all those cases
+
+#+NAME: rpn-02
+#+BEGIN_SRC haskell :results none
+<<rpn-01>>
+
+:set -XOverloadedStrings
+
+import TextShow
+
+:{
+data EvalError = NotEnoughElements
+               | ExtraElements
+               | NotANumber T.Text
+               | UnknownVar T.Text
+:}
+
+:{
+instance TextShow EvalError where
+  showb NotEnoughElements = "Not enough elements in the expression"
+  showb ExtraElements = "There are extra elements in the expression"
+  showb (NotANumber n) = "In expression '" <> (fromText n) <> "' is not a number"
+  showb (UnknownVar v) = "Variable '" <> (fromText v) <> "' is not defined"
+:}
+#+END_SRC
+
+Now we can define our monad stack
+
+#+NAME: rpn-03
+#+BEGIN_SRC haskell :results none
+<<rpn-02>>
+
+import Control.Monad.Reader
+import Control.Monad.State
+import Control.Monad.Except
+
+type EvalM = ReaderT Variables (ExceptT EvalError (State Stack))
+#+END_SRC
+
+Evaluate one expression
+
+#+NAME: rpn-04
+#+BEGIN_SRC haskell :results none
+<<rpn-03>>
+
+:{
+push :: Integer -> EvalM ()
+push x = modify (x:)
+:}
+
+:{
+pop :: EvalM Integer
+pop = get >>= pop'
+  where
+    pop' :: Stack -> EvalM Integer
+    pop' [] = throwError NotEnoughElements
+    pop' (x:xs) = put xs >> pure x
+:}
+
+:{
+popOnly :: EvalM Integer
+popOnly = check >> pop
+  where
+    check :: EvalM ()
+    check = do
+      len <- gets length
+      when (len /= 1) $ throwError ExtraElements
+:}
+
+:{
+readVar :: T.Text -> EvalM Integer
+readVar name = do
+  var <- asks (lookup name)
+  case var of
+    Just n -> return n
+    Nothing -> throwError $ UnknownVar name
+:}
+
+import Text.Read (readMaybe)
+
+:{
+readNumber :: T.Text -> EvalM Integer
+readNumber t = case readMaybe $ T.unpack t of
+                 Just n -> return n
+                 Nothing -> throwError $ NotANumber t
+:}
+
+:{
+readSafe :: T.Text -> EvalM Integer
+readSafe t
+  | isVar t = readVar t
+  | otherwise = readNumber t
+  where isVar t = case T.unpack t of
+                    (c:_) -> Data.Char.isAlpha c
+                    _ -> False
+:}
+
+import Data.Foldable (traverse_)
+
+:{
+evalOne :: T.Text -> EvalM Integer
+evalOne t = clearStack >> traverse_ step (T.words t) >> popOnly
+  where
+    clearStack :: EvalM ()
+    clearStack = put []
+    step "+" = stepOp (+)
+    step "*" = stepOp (*)
+    step "-" = stepOp (-)
+    step t = readSafe t >>= push
+    stepOp op = flip op <$> pop <*> pop >>= push
+:}
+#+END_SRC
+
+Eval many
+
+#+NAME: rpn-05
+#+BEGIN_SRC haskell
+<<rpn-04>>
+
+:{
+reportEval :: Either EvalError [Builder] -> T.Text
+reportEval (Left e) = "Error: " <> showt e
+reportEval (Right b) = toText $ unlinesB b
+:}
+
+:{
+evalMany :: [T.Text] -> Variables -> T.Text
+evalMany t var = reportEval $ evalState (runExceptT (runReaderT (mapM eval t) var)) []
+  where
+    eval t = (fromText t <> ) <$> (buildOk <$> evalOne t) `catchError` (pure . buildErr)
+    buildOk res = " = " <> showb res
+    buildErr err = " Error: " <> showb err
+:}
+
+T.lines $ evalMany ["x", "40 2 +", "1", "+", "x 12 *"] [("x", 3)]
+#+END_SRC
+
+#+RESULTS: rpn-05
+#+BEGIN_EXAMPLE
+["x = 3","40 2 + = 42","1 = 1","+ Error: Not enough elements in the expression","x 12 * = 36"]
+#+END_EXAMPLE
+
+* 7.3 GHC runtime exceptions
+The GHC runtime systems implements an exception throwing/handling mechanism.
+
+RULE: exception can be thrown anywhere but can be caught only in ~IO~
+computations.
+
+The ~Control.Exception~ module defines:
+- A type that encapsulate any exception (~SomeException~)
+- A type class that defines methods for wrapping/unwrapping exceptions
+  (~Exception~)
+- Types for particular exceptions thrown by the runtime (ex. ~ArithException~)
+- Utilities to throw/catch exceptions
+
+We will use ~Control.Monad.Catch~ from ~exceptions~ package to handle runtime
+exceptions easier in a monad stack.
+
+#+BEGIN_SRC haskell
+import Control.Exception
+
+:i SomeException
+:i Exception
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+type SomeException :: *
+data SomeException = forall e. Exception e => SomeException e
+        -- Defined in ‘GHC.Exception.Type’
+instance Show SomeException -- Defined in ‘GHC.Exception.Type’
+instance TextShow SomeException
+  -- Defined in ‘TextShow.Control.Exception’
+instance Exception SomeException -- Defined in ‘GHC.Exception.Type’
+type Exception :: * -> Constraint
+class (base-4.14.3.0:Data.Typeable.Internal.Typeable e, Show e) =>
+      Exception e where
+  toException :: e -> SomeException
+  fromException :: SomeException -> Maybe e
+  displayException :: e -> String
+        -- Defined in ‘GHC.Exception.Type’
+instance Exception ErrorCall -- Defined in ‘GHC.Exception’
+instance Exception SomeException -- Defined in ‘GHC.Exception.Type’
+instance Exception ArithException
+  -- Defined in ‘GHC.Exception.Type’
+instance Exception TypeError -- Defined in ‘Control.Exception.Base’
+instance Exception RecUpdError
+  -- Defined in ‘Control.Exception.Base’
+instance Exception RecSelError
+  -- Defined in ‘Control.Exception.Base’
+instance Exception RecConError
+  -- Defined in ‘Control.Exception.Base’
+instance Exception PatternMatchFail
+  -- Defined in ‘Control.Exception.Base’
+instance Exception NonTermination
+  -- Defined in ‘Control.Exception.Base’
+instance Exception NoMethodError
+  -- Defined in ‘Control.Exception.Base’
+instance Exception NestedAtomically
+  -- Defined in ‘Control.Exception.Base’
+instance Exception SomeAsyncException
+  -- Defined in ‘GHC.IO.Exception’
+instance Exception IOException -- Defined in ‘GHC.IO.Exception’
+instance Exception Deadlock -- Defined in ‘GHC.IO.Exception’
+instance Exception CompactionFailed
+  -- Defined in ‘GHC.IO.Exception’
+instance Exception BlockedIndefinitelyOnSTM
+  -- Defined in ‘GHC.IO.Exception’
+instance Exception BlockedIndefinitelyOnMVar
+  -- Defined in ‘GHC.IO.Exception’
+instance Exception AsyncException -- Defined in ‘GHC.IO.Exception’
+instance Exception AssertionFailed -- Defined in ‘GHC.IO.Exception’
+instance Exception ArrayException -- Defined in ‘GHC.IO.Exception’
+instance Exception AllocationLimitExceeded
+  -- Defined in ‘GHC.IO.Exception’
+#+END_EXAMPLE
+
+Define and use a simple arithmetic exception
+
+#+NAME: math-exception
+#+BEGIN_SRC haskell :results none
+:set -XDeriveAnyClass
+
+import Control.Exception
+
+data MathException = DivByZero deriving (Show, Exception)
+
+-- throw an exception
+
+-- `throw` will throw an exception in pure code
+-- `throwIO` will throw an exception in IO computation
+-- `ioThrow` will throw a specific `IOException`
+-- `throwTo` will throw an exception in a target thread
+
+:{
+divPure :: Int -> Int -> Int
+divPure _ 0 = throw DivByZero
+divPure n m = n `div` n
+:}
+#+END_SRC
+
+#+BEGIN_SRC haskell
+<<math-exception>>
+
+fst (divPure 5 5, divPure 5 0)
+divPure 5 0
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+1
+,*** Exception: DivByZero
+#+END_EXAMPLE
+
+~MonadThrow~ type class from the ~exception~ package defines a class of monads
+able to throw exceptions
+
+#+NAME: div-m
+#+BEGIN_SRC haskell :results none
+<<math-exception>>
+
+import Control.Monad.Catch
+
+:{
+divM :: MonadThrow m => Int -> Int -> m Int
+divM _ 0 = throwM DivByZero
+divM n m = pure $ n `div` m
+:}
+
+checkComputation a b c = divM a b >>= divM c
+#+END_SRC
+
+#+BEGIN_SRC haskell
+<<div-m>>
+
+checkComputation 6 3 10 :: Maybe Int
+checkComputation 6 0 10 :: Maybe Int
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+Just 5
+Nothing
+#+END_EXAMPLE
+
+** Cleanup after exceptions
+We often need to release resources whether an exception was thrown or not, for
+that we can use:
+- ~finally :: IO a -> IO b -> IO a~ for executing some action no matter what.
+- ~onException :: IO a -> IO b -> IO a~ for executing some action if an
+  exception was thrown.
+- ~braket :: IO a -> (a -> IO b) -> (a -> IO c) -> IO c~ for implementing
+  regular resources aware code with acquisition (~IO a~), release (~a -> IO b~)
+  and use (~a -> IO c~)
+
+** Recover after exception
+Suppose we want to run ~divM~ and return ~0~ in case of ~DivByZero~, we use
+~try :: Exception e => IO a -> IO (Either e a)~
+
+#+BEGIN_SRC haskell
+<<div-m>>
+
+import Data.Functor ((<&>))
+
+-- NOTE: it works because ~IO~ implements ~MonadThrow~ for ~divM~
+
+:{
+divWithRecovery :: Int -> Int -> IO Int
+divWithRecovery x y = Control.Exception.try (divM x y) <&> dealWith
+  where
+    dealWith :: Either MathException Int -> Int
+    dealWith (Left e) = 0
+    dealWith (Right n) = n
+:}
+
+divWithRecovery 9 0
+divWithRecovery 9 9
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+0
+1
+#+END_EXAMPLE
+
+** Exception handling with ~catch~ and ~handle~
+
+~Control.Exception.catch :: Exception e => IO a -> (e -> IO b) -> IO a~
+~Control.Monad.Catch.catch :: (MonadCatch m, Exception e) => m a -> (e -> m b) -> m a~
+
+#+BEGIN_SRC haskell
+<<div-m>>
+
+:{
+divTest :: Int -> Int -> IO Int
+divTest x y = divM x y `Control.Exception.catch` handler
+  where
+    handler :: MathException -> IO Int
+    handler e = do
+      putStrLn $ "Caught an exception: " ++ show e
+      pure 0
+:}
+
+divTest 9 0
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+Caught an exception: DivByZero
+0
+#+END_EXAMPLE
+
+* 7.4 Example: Accessing web APIs and GHC exceptions
+
+** Aeson
+~aeson~ for JSON encoding/decoding by using ~DeriveGeneric~
+#+BEGIN_SRC haskell :eval never
+:set -XDeriveGeneric
+:set -XDeriveAnyClass
+:set -XOverloadedStrings
+
+import Data.Text
+import GHC.Generics
+import Data.Aeson
+
+:{
+data GeoCoords = GeoCoords { lat :: Text
+                           , log :: Text
+                           }
+  deriving (Show, Generic, FromJSON)
+:}
+
+decode "{\"lat\": \"40.355436\", \"lon\": \"-74.658770\"}"
+eitherDecode "{\"lat\": \"40.355436\", \"lon\": \"-74.658770\"}"
+#+END_SRC
+
+** Req
+~req~ for HTTP requests
+
+ASK: how can ~=:~ produce an ~Option~, see [[https://hackage.haskell.org/package/req-3.13.0/docs/Network-HTTP-Req.html#g:8][this]]
+
+NOTE: ~req~ will raise an exception if the JSON decode fails
+
+#+BEGIN_SRC haskell :eval never
+type Address = Text
+
+data WebAPIAuth = WebAPIAuth { email :: Text
+                             , agent :: Text
+                             }
+
+getCoords :: Address -> WebAPIAuth -> IO GeoCoords
+getCoords addr auth do
+  let ep = https "nominatim.openstreetmap.org" /: "search"
+      reqParams = mconcat [ "q" =: addr
+                          , "format" =: ("json" :: Text)
+                          , "limit" =: (1 :: Int)
+                          , "email" =: email auth
+                          , header "User-Agent" (encodeUtf8 $ agent auth)
+                          ]
+      request = req GET ep NoReqBody jsonResponse reqParams
+  res <- responseBody <$> runReq def request
+  case res of
+    [] -> -- ...
+    (coords:_) -> pure coords
+#+END_SRC
+
+** Command line
+NOTE: use of ~Alternative~ and ~Applicative~
+
+#+BEGIN_SRC haskell :eval never
+data AppMode = FileInput FilePath | Interactive
+
+data Params = Params AppMode FilePath
+
+mkParams :: Opt.Parser Params
+mkParams = Params <$> (fileInput <|> interactive) <*> config
+  where
+    fileInput = FileInput <$> strOption ...
+    interactive = flag Interactive Interactive ...
+    config = strOption ...
+#+END_SRC
+
+** Application structure
+We have a configuration file that we need to parse and feed to the application,
+classic job for a ~ReaderT~, so the application monad stack is
+
+#+BEGIN_SRC haskell :eval never
+newtype MyApp a = MyApp { runApp :: ReaderT WebAPIAuth IO a }
+  deriving (Functor, Applicative, Monad, MonadIO, MonadReader WebAPIAuth)
+
+runMyApp :: MyApp a -> WebAPIAuth -> IO a
+runMyApp app config = runReaderT (runApp app) config
+
+getCoords :: Address -> MyApp GeoCoords
+getCoords addr = do
+  wauth <- ask
+  -- prepare request
+  -- issue request
+  -- handle response
+
+withConfig :: Params -> IO ()
+withConfig (Params mode config) = do
+  auth <- eitherDecodeStrict <$> B.readFile config
+  case auth of
+    Right auth' -> runMyApp (run mode) auth'
+    Left err -> ...
+  where
+    run :: AppMode -> MyApp ()
+    run = ...
+#+END_SRC
+
+** Exception handling
+Strategies:
+- *IGNORE* unable to handle, resume normal operation
+- *RE-THROW* unable to handle, re-throw the same exception
+- *THROW* unable to handle, throw another exception with more context
+- *DEFAULT* handle by resume with a default value
+- *PRINT,STOP* when unable to resume, log the exception and stop
+- *PRINT,CONTINUE* when able to resume, log the exception and continue
+- *PRINT,REPEAT* when we can retry, log the exception and retry
+
+* 7.5 Logging
+What:
+- Errors, when something goes wrong
+- Events, for recording what is going on
+- History, for recording all operations for auditing
+
+Components:
+- Source, logging instruction in the source code (also server, service,
+  instance, pod, ...)
+- Object, message of the log with data alongside it
+- Sink, destination of the log (STDOUT/STDERR, file, database, external service,
+  ...)
+
+Stages:
+- Configure log format and sink
+- Acquire related resources (file, connection, ...)
+- Writing logs
+- Releasing resources
+
+PROBLEM: they are spread over the source code, example of aspect-oriented
+programming.
+
+Solutions (~30 popular packages to solve the issues)
+- Simple, low-level (~hslogger~, ~fast-logger~, ~logging~, ~simple-log~,
+  ~simple-logger~, ~simple-logging~)
+- Industrial level logging with support for monad stack (~monad-logger~,
+  ~katip~, ~log-base~, ~logging-effect~, ~heavy-logger~)
+- Experimental (~co-log~, ~log-effect~)
+
+** Use of monad-logger
+- Defines the ~MonadLogger~ type class, can write logs in every monad that
+  implements it
+- There's a ~LoggingT~ monad transformer, logging in stacks based on ~IO~
+- There's a ~WriterLoggingT~ monad transformer, logging in pure computation
+- Multiple runners to run computations with logging into various destinations
+- Can filter an map computations with logging using ~filterLog~ and
+  ~mapLoggingT~ functions
+- Can log with ~logDebug~, ~logError~ and others
+- Uses ~TemplateHaskell~ to record file, line, column of the log
+
+#+BEGIN_SRC haskell :eval never
+popAndLog :: LoggingT (StateT [Int] IO) ()
+popAndLog = do
+  _:xs <- lift get
+  lift (put xs)
+  $logDebug ("***" <> (pack $ show xs) <> "****")
+#+END_SRC
+
+* Recap
+- Runtime exceptions
+- Programmable exceptions (~Control.Exception~, ~Control.Monad.Catch~)
+- Exception handling requires planning
+
+* Exercises
+- Command line TODO list app with file storage
+  - Add new item
+  - Mark an item as done
+  - Add new item with due date
+  - List item to be done
+  - List items to be done today
+  - List items to be done ordered by due date
+  - ...
