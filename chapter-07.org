@@ -616,11 +616,4 @@ popAndLog = do
 - Exception handling requires planning
 
 * Exercises
-- Command line TODO list app with file storage
-  - Add new item
-  - Mark an item as done
-  - Add new item with due date
-  - List item to be done
-  - List items to be done today
-  - List items to be done ordered by due date
-  - ...
+- Exercise 3 of [[https://proglang.informatik.uni-freiburg.de/teaching/functional-programming/2017/exercises/ex7.pdf][this]]
