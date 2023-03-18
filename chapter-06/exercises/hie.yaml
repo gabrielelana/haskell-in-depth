@@ -1,0 +1,13 @@
+cradle:
+  cabal:
+    - path: "src"
+      component: "lib:exercises"
+
+    - path: "app/Main.hs"
+      component: "exercises:exe:exercises-exe"
+
+    - path: "app/Paths_exercises.hs"
+      component: "exercises:exe:exercises-exe"
+
+    - path: "test"
+      component: "exercises:test:exercises-test"
