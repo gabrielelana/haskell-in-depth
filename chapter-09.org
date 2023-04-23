@@ -1,0 +1,466 @@
+#+TITLE: Haskell data and Code at Run Time
+
+#+PROPERTY: header-args:haskell :results replace output
+#+PROPERTY: header-args:haskell+ :noweb yes
+#+PROPERTY: header-args:haskell+ :wrap EXAMPLE
+
+- Representing data and code in memory at run time
+- Haskell feature that affect performance
+- Code optimizations done by compiler
+
+* 9.1 A mental model for Haskell memory usage at run time
+- Static memory: all objects known at compile time
+- Stack: immediate values, addresses of where to go next, ...
+- Heap: dynamic objects, everything created at run time
+
+Given the immutable nature of Haskell, the heap is used a lot, GHC tries very
+hard to avoid to allocate memory and/or reuse existing values when possible.
+
+Heap is a collection of /closures/, entities used for representing both data and
+code, every closure is a pair
+- Description
+  - Info Table: describes the content of the payload
+  - Entry Code: evaluated whenever we enter the closure
+  - Counters: only when compiled for profiling
+- Payload: depends on the type of the closure
+
+Closures can depend on each other, those dependencies are tracked in a graph in
+the heap and used by the garbage collector.
+
+** 9.1.2 Primitive unboxed data types
+Storing everything in closure is not the most efficient thing, to get the better
+performance GHC gives us the ability to use /unboxed types/ (sometimes called
+/primitive unboxed types/)
+
+~GHC.Prim~ module exports several primitive types
+- ~Int#~ signed native-sized integer
+- ~Word#~ unsigned native-sized integer
+- ~Int8#~, ~Int16#~ smaller size signed integer
+- ~Word8#~, ~Word16#~ smaller size unsigned integer
+- ~Char#~ 31 bit (???) characters
+- ~Float#~ 32 bit floating point number
+- ~Double#~ 64 bit floating point number
+- ~Addr#~ memory address
+
+NOTE: You need to enable the ~MagicHash~ GHC extension
+
+#+BEGIN_SRC haskell
+:set -XMagicHash
+
+:t 3#
+:t 3.14#
+:t 'x'#
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+3# :: GHC.Prim.Int#
+3.14# :: GHC.Prim.Float#
+'x'# :: GHC.Prim.Char#
+#+END_EXAMPLE
+
+** 9.1.3 Representing data and code in memory with closures
+There's not much difference between code and data in Haskell. You can have code
+assigned to a field of a data constructor. You can have un-evaluated data (due
+to laziness) represented as a thunk (code that is able to evaluate a value
+whenever is needed).
+
+A payload of closures corresponding to data constructors contains pointers to
+closures for each constructor's fields.
+
+#+BEGIN_SRC haskell :eval never
+data Shape = Rectangle Int Int | Circle Int
+
+-- Knowing that
+data Int = #I Int#
+
+-- Circle     -- 2 word = 1 pointer to description + 1 pointer to fieldI#
+-- └ #I       -- 1 word = 1 pointer to description
+--   └ #Int   -- 1 word = data
+
+-- Rectangle  -- 3 word = 1 pointer to description + 2 pointers to field I#
+-- └ #I       -- 1 word = 1 pointer do description
+--    └ #Int  -- 1 word = data
+-- └ #I       -- 1 word = 1 pointer to description
+--    └ #Int  -- 1 word = data
+#+END_SRC
+
+GHC may optimize some of these closures away, especially closures for small and
+strict primitive values
+
+Code is represented like data with closures with a different payload and
+description
+- Functions: payload contain references to values that occur freely in the code,
+  the entry code is the function code itself. (???)
+- Thunks: un-evaluated expressions, the entry code in the closure's description
+  is the code to evaluate the corresponding expression.
+
+NOTE: one of the main feature of thunks as closures is their ability to be
+updated when their value is evaluated. After evaluation the closure becomes an
+indirection: a closure that references another closure containing the result of
+the evaluation.
+
+*** Stages of evaluation
+
+#+BEGIN_SRC haskell :eval never
+let x = a + 2 in ...
+#+END_SRC
+
+1. Before the value of ~x~ is required
+   #+BEGIN_EXAMPLE
+   -- x
+   -- └ THUNK
+   --   └ code (a + 2)
+   --   └ empty slot      -- will be filled when becomes an indirection
+   --   └ a               -- free variable
+   --     └ I#            -- closure representing the value of ~a~
+   --       └ description
+   --       └ 3#
+   #+END_EXAMPLE
+2. After the value of ~x~ is required
+   #+BEGIN_EXAMPLE
+   -- x
+   -- └ IND
+   --   └ I#              -- closure representing the computed value
+   --     └ 5#
+   --   └ empty slot
+   #+END_EXAMPLE
+3. After garbage collection (assuming ~x~ is still needed)
+   #+BEGIN_EXAMPLE
+   -- x                 -- removed the indirection
+   -- └ I#              -- closure representing the computed value
+   --   └ 5#
+   #+END_EXAMPLE
+
+*** Forms of evaluation
+
+- Unevaluated :: if it's represented by a thunk
+- Normal Form :: if it's fully evaluated
+- Weak Head Normal Form :: if it's represented by a closure corresponding to a
+  data constructor
+
+TODO: review NF and WHNF on "Haskell Programming from First Principles"
+
+** 9.1.4 Lifted types and the concept of strictness
+(Theoretical ideas that are implemented with this approach to memory usage)
+
+- Lifted Type :: if it's values may take the special value ~undefined~ called
+  /bottom/ and often denoted as ⊥. Most of the types in Haskell are lifted, we
+  assume bottom value is automatically added to every type we define in Haskell.
+
+- Unlifted Type :: if it's values cannot be bottom. Unboxed types are always
+  unlifted. Boxed types can be unlifted if they are straight pointers (ex.
+  ~Array#~)
+
+- Strict Function :: if given the bottom value as argument it returns the bottom
+  value. If a it has more than one argument, we could say that it's strict in
+  the first, second, ..., argument (ex. ~const~ is strict on the first argument
+  but not on the second).
+
+* 9.2 Control over evaluation and memory usage
+The ability to control the process of evaluating Haskell values is quite limited
+1. Add more strictness to the code reducing the thunks.
+2. Exploit unboxed types.
+
+** 9.2.1 Controlling strictness and lazyness
+GHC provides many ways to control strictness and lazyness in the code
+
+*** Function seq
+The function ~seq :: a -> b -> b~ is guaranteed to be strict on the first
+argument
+
+#+BEGIN_SRC haskell
+:{
+sumN :: Int -> Int
+sumN = go 0
+  where
+    go acc 0 = acc
+    go acc n = go (acc + n) (n - 1)
+:}
+
+sumN 10
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+55
+#+END_EXAMPLE
+
+In this implementation ~acc~ will not evaluated until ~n~ is ~0~, with every
+call to ~go~ a thunk is created.
+
+#+BEGIN_SRC haskell
+:{
+sumN :: Int -> Int
+sumN = go 0
+  where
+    go acc 0 = acc
+    go acc n = acc `seq` go (acc + n) (n - 1)
+:}
+
+sumN 10
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+55
+#+END_EXAMPLE
+
+In the last implementation use ~seq~ to keep ~acc~ in its evaluated form.
+
+*** Bang pattern
+~BangPatterns~ GHC extension enables adding ~!~ to patterns with the following
+effect
+
+#+BEGIN_SRC haskell :eval never
+case v of {!pat -> ...; _ -> ...}
+
+-- is equal to
+
+v `seq` case v of {path -> ...; _ -> ...}
+#+END_SRC
+
+We can use it in the ~sumN~ function
+
+#+BEGIN_SRC haskell
+:set -XBangPatterns
+
+:{
+sumN :: Int -> Int
+sumN = go 0
+  where
+    go acc 0 = acc
+    go !acc n = go (acc + n) (n - 1)
+:}
+
+sumN 10
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+55
+#+END_EXAMPLE
+
+NOTE: there's no sense of using ~!~ in destructuring patterns like ~!(x, y)~
+since the original pattern ~(x, y)~ is already checking if the value is a pair
+therefore evaluating it in its WHNF.
+
+#+BEGIN_SRC haskell
+:set -XBangPatterns
+
+-- _ will never be evaluated
+let _ = undefined in "OK"
+
+-- let's force it
+let !_ = undefined in "OK"
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+> "OK"
+> "*** Exception: Prelude.undefined
+CallStack (from HasCallStack):
+  error, called at libraries/base/GHC/Err.hs:74:14 in base:GHC.Err
+  undefined, called at <interactive>:102:10 in interactive:Ghci29
+#+END_EXAMPLE
+
+*** Strict folds
+Prelude has strict version of the following functions
+- ~foldl~ -> ~foldl'~
+- ~foldl1~ -> ~foldl1'~
+- ~scanl~ -> ~scanl'~
+- ~scanl1~ -> ~scanl1'~
+
+#+BEGIN_SRC haskell
+import Data.List
+
+:set +s
+
+foldl' (+) 0 [1..10^6]
+foldl (+) 0 [1..10^6]
+
+:unset +s
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+500000500000
+(0.04 secs, 88,132,336 bytes)
+500000500000
+(0.24 secs, 161,359,088 bytes)
+#+END_EXAMPLE
+
+This makes sense when the evaluation of the accumulator in its WHNF is
+equivalent of its NF otherwise is not going to make a difference.
+
+If the accumulator is something like ~data AnotherInt = AI Int~ you need to put
+strictness flags in the data constructor.
+
+*** Strictness flags in data constructors
+NOTE: when we create some value with a data constructor its arguments are
+normally not evaluated, instead a thunk is created for every field.
+
+We can force their evaluation of WHNF by adding a strictness flag to their
+definition.
+
+~data AnotherInt = AI !Int~
+
+~data Point = Point {x :: !Double, y :: !Double}~
+
+GHC will apply ~seq~ to the corresponding arguments of the data constructor
+before applying it.
+
+#+BEGIN_SRC haskell
+data Point = Point {x :: Double, y :: Double} deriving Show
+
+let x = 1.0; y = 2.0 in Point { x = x, y = y }
+
+-- with
+
+data Point = Point {x :: !Double, y :: !Double} deriving Show
+
+-- will become
+
+let x = 1.0; y = 2.0 in x `seq` y `seq` Point {x = x, y = y}
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+Point {x = 1.0, y = 2.0}
+Point {x = 1.0, y = 2.0}
+#+END_EXAMPLE
+
+*** Strict and StrictData extensions
+To alleviate visual pollution of bang patterns
+
+- ~StrictData~ makes all the fields of all the data types defined in the current
+  module strict by default
+- ~Strict~ makes all function arguments and other bindings strict by default
+  (implies ~StrictData~)
+- They allow reverting strictness with ~~~ pattern
+  #+BEGIN_SRC haskell :eval never
+  :set -XStrict
+
+  data Point = Point {x :: ~Double, y :: ~Double}
+  #+END_SRC
+
+NOTE: strict doesn't always means more performant, always benchmark!
+
+*** DeepSeq
+If you need to ensure a value is in its NF you can use ~deepseq~ from
+~Control.DeepSeq~ in ~deepseq~ package
+
+Based on ~NFData~ typeclass
+
+~deepseq :: NFData a => a -> b -> b~
+
+~force :: NFData a => a -> a~
+
+~$!! :: NFData a => (a -> b) -> a -> b~
+
+** 9.2.2 Defining data types with unboxed values
+GHC provides several tools to ask for unboxing.
+
+*** UNPACK pragma
+Instead of making sure to evaluate values in their WHNF when constructing values
+with a data constructor we can put them directly into the payload as unboxed
+values with the ~UNPACK~ pragma.
+
+It is required to have strictness flags on all unpacked fields.
+
+#+BEGIN_SRC haskell :eval never
+data Shape = Rectangle {-# UNPACK #-} !Int
+                       {-# UNPACK #-} !Int
+           | Circle {-# UNPACK #-} !Int
+#+END_SRC
+
+There's also ~-funbox-strict-fields~ compilation flag which adds ~UNPACK~ pragma
+to every strict field.
+
+*** Unboxed tuples and sums
+We are not allowed to define primitive unboxed types but we can define unboxed
+tuples and unboxed sums using respectively ~UnboxedTuples~ and ~UnboxedSums~
+extensions.
+
+#+BEGIN_SRC haskell
+:set -XUnboxedTuples
+:set -XUnboxedSums
+
+:{
+sumProd :: Num a => a -> a -> (# a, a #)
+sumProd a b = (# a + b, a * b #)
+:}
+
+let (# s, p #) = sumProd 5 6 in print (s, p)
+
+:{
+smallest :: (# Double | (# Double, Double #) #) -> Double
+smallest (# d | #) = d
+smallest (# | (# x, y #) #) = min x y
+:}
+
+smallest (# 5.4 | #)
+smallest (# | (# 2.3, 1.2 #) #)
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+(11,30)
+5.4
+1.2
+#+END_EXAMPLE
+
+* 9.3 Exploring compiler optimizations by example
+NOTE: what's written by the programmer can be different than what's executed by
+the GHC runtime
+
+#+BEGIN_SRC haskell
+:set +s
+
+:{
+isPrime :: Integer -> Bool
+isPrime n = all notDividedBy [2..n-1]
+  where
+    notDividedBy m = n `mod` m /= 0
+:}
+
+isPrime 78680101
+isPrime 78680100
+:unset +s
+
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+True
+(21.20 secs, 16,995,024,776 bytes)
+False
+(0.00 secs, 124,880 bytes)
+#+END_EXAMPLE
+
+The lazy part did it's job, since the second is divisible by 2 there's no reason
+to evaluate other numbers, but we didn't code it, it's in the lazyness (and in
+the definition of ~Monoid~ typeclass of ~All~ data type)
+
+** 9.3.1 Optimizing code manually
+To see what's actually executed you need to
+
+1. Desugaring: replace syntactic sugar with function calls
+2. Inlining: replace function calls with body of the function
+3. Rewriting: replace code that matches some pattern to something else
+
+** 9.3.2 Looking at GHC core
+By compiling code and spitting out GHC core we can figure out what's actually
+executed and what optimizations are successfully applied and what not.
+
+* Summary
+- Haskell programs are very demanding on memory due to immutability and lazyness.
+- Closures are used to implement lazyness evaluation.
+- We have many ways to control/affect lazyness.
+- Adding strictness may boost code performance and reduce memory usage.
+- But no always so it better to benchmark code before trying to optimize.
+- GHC implements many sophisticated optimizations that turn lazy code into an
+  efficient executable.
+
+* Exercises
+TODO
