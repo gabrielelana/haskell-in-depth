@@ -432,3 +432,19 @@ how to improve it.
 * Exercises
 - Take some existing OS projects and describe how they did their tests
 - Take some existing OS projects and add some tests
+
+** Take some existing OS projects and describe how they did their tests
+*** Alga
+- [[https://nobrakal.github.io/alga-tutorial/][Tutorial]]
+- [[https://github.com/snowleopard/alga/blob/master/test/Main.hs][Tests starts here]]
+- [[https://github.com/snowleopard/alga/blob/master/test/Algebra/Graph/Test.hs][Axioms and Theorems]], [[https://github.com/snowleopard/alga/blob/a0170a4188ee67a761a5f4b5942cdb8964060bc0/test/Algebra/Graph/Test.hs#L35][Test function]] and [[https://github.com/snowleopard/alga/blob/master/test/Algebra/Graph/Test/Graph.hs#L38][their usage]]
+- [[https://github.com/snowleopard/alga/blob/master/test/Algebra/Graph/Test/Graph.hs#L38][Arbitrary definition, cool shrink, never saw it before]]
+*** Ormolu (Golden Master Technique)
+- [[https://github.com/tweag/ormolu/blob/ee75df12731c3c2875a5fd97b892cb00683646bb/tests/Ormolu/PrinterSpec.hs#L23][Start from ~Spec~]]
+- [[https://github.com/tweag/ormolu/blob/ee75df12731c3c2875a5fd97b892cb00683646bb/tests/Ormolu/PrinterSpec.hs#L38][Calls ~checkExample~]] see [[https://github.com/tweag/ormolu/blob/ee75df12731c3c2875a5fd97b892cb00683646bb/tests/Ormolu/PrinterSpec.hs#L38][~withNiceExceptions~]], [[https://github.com/tweag/ormolu/blob/ee75df12731c3c2875a5fd97b892cb00683646bb/tests/Ormolu/PrinterSpec.hs#L38][~whenShouldGenerateOutput~]] and [[https://github.com/tweag/ormolu/blob/ee75df12731c3c2875a5fd97b892cb00683646bb/tests/Ormolu/PrinterSpec.hs#L86][~shouldMatch~]]
+- [[https://github.com/tweag/ormolu/blob/ee75df12731c3c2875a5fd97b892cb00683646bb/tests/Ormolu/Fixity/PrinterSpec.hs#L47][QuickCheck with round-trip properties]]
+  - NOTE: [[https://github.com/tweag/ormolu/blob/ee75df12731c3c2875a5fd97b892cb00683646bb/tests/Ormolu/Fixity/PrinterSpec.hs#L15][A newtype to have a specific Arbitrary for the test]]
+*** Shellcheck
+- [[https://github.com/koalaman/shellcheck/blob/master/test/shellcheck.hs][Run tests]]
+  - What tests? [[https://github.com/koalaman/shellcheck/blob/master/src/ShellCheck/Parser.hs#L90][Everything that starts with ~prop_~]]
+  - How? https://hackage.haskell.org/package/QuickCheck-2.14.2/docs/Test-QuickCheck.html#v:quickCheckAll
