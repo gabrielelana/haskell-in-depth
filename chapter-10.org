@@ -1,0 +1,299 @@
+#+TITLE: Benchmarking and Profiling
+
+#+PROPERTY: header-args:haskell :results replace output
+#+PROPERTY: header-args:haskell+ :noweb yes
+#+PROPERTY: header-args:haskell+ :wrap EXAMPLE
+
+- Benchmarking code in Haskell
+- Exploring time and space consumption
+- Tips and Tricks to optimize code
+
+NOTE
+- Explore time and space consumption (profiling) and use this information to
+  find drawbacks in the implementation such as memory leaks.
+- Time execution (benchmarking) to make our programs run faster.
+
+* 10.1 Benchmarking functions with criterion
+Library /criterion/ is the most used for benchmarking (measuring execution
+time). The goal is to measure the performance characteristics and compare
+different implementations.
+
+What /criterion/ does:
+- Runs the given function with the given argument many times (/experiment/).
+- Counts the execution time of every run (population unit) and creates a
+  /sample/ (collection of units).
+- Analyzes the sample using statistical methods and presents the results to the
+  user in both textual and visual forms.
+
+NOTE: the library tries to alleviate the influence of lazyness by:
+- Preparing arguments.
+- Warming up prior to running experiments.
+- Evaluating results in NF.
+
+NOTE: the process of benchmarking depends on what we actually need to benchrmak
+- Pure function or IO action?
+- Where do we get the arguments?
+- How complex are the arguments?
+
+#+BEGIN_SRC haskell
+import Criterion.Main
+
+:{
+isPrime :: Integer -> Bool
+isPrime n = all notDividedBy [2 .. n-1]
+  where
+    notDividedBy m = n `mod` m /= 0
+:}
+
+:{
+isPrimeUnfolded :: Integer -> Bool
+isPrimeUnfolded n = go 2
+  where
+    go x = case x > n-1 of
+             True -> True
+             False -> case n `mod` x /= 0 of
+                        True -> go (x+1)
+                        False -> False
+:}
+
+:{
+isPrimeOptimized :: Integer -> Bool
+isPrimeOptimized n = all notDividedBy [2 .. n `div` 2]
+  where
+    notDividedBy m = n `mod` m /= 0
+:}
+
+
+:{
+primeNumber :: Integer
+primeNumber = 16183
+:}
+
+:{
+main :: IO ()
+main = defaultMain
+  [ bench "isPrime (declarative)" $ whnf isPrime primeNumber
+  , bench "isPrime (unfolded)" $ whnf isPrimeUnfolded primeNumber
+  , bench "isPrime (optimized)" $ whnf isPrimeOptimized primeNumber
+  ]
+:}
+
+main
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+benchmarking isPrime (declarative)
+time                 4.680 ms   (4.554 ms .. 4.840 ms)
+                     0.992 R²   (0.987 R² .. 0.996 R²)
+mean                 4.816 ms   (4.725 ms .. 4.900 ms)
+std dev              256.5 μs   (222.9 μs .. 302.6 μs)
+variance introduced by outliers: 32% (moderately inflated)
+
+benchmarking isPrime (unfolded)
+time                 10.33 ms   (9.999 ms .. 10.64 ms)
+                     0.995 R²   (0.992 R² .. 0.998 R²)
+mean                 10.06 ms   (9.955 ms .. 10.21 ms)
+std dev              357.8 μs   (270.6 μs .. 463.6 μs)
+variance introduced by outliers: 13% (moderately inflated)
+
+benchmarking isPrime (optimized)
+time                 2.562 ms   (2.551 ms .. 2.572 ms)
+                     1.000 R²   (0.999 R² .. 1.000 R²)
+mean                 2.518 ms   (2.493 ms .. 2.534 ms)
+std dev              66.11 μs   (44.11 μs .. 95.91 μs)
+variance introduced by outliers: 12% (moderately inflated)
+#+END_EXAMPLE
+
+where
+
+#+BEGIN_SRC haskell
+import Criterion.Main
+
+:t defaultMain
+:t bench
+:t whnf
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+defaultMain :: [Benchmark] -> IO ()
+bench :: String -> Benchmarkable -> Benchmark
+whnf :: (a -> b) -> a -> Benchmarkable
+#+END_EXAMPLE
+
+ASK: very different results from the book, is it because I'm running it in GHCI?
+In the book they run in the same time, here the declarative is twice as fast.
+
+How to read the results:
+- Time :: time taken eliminating as many constant factors as possible.
+- R-squared goodness-of-fit :: characterizes the accuracy of measurements, if
+  it's less than ~0.999~ something is wrong.
+- Mean :: is the average execution time.
+- Std dev :: the distance between the mean value and the specific results, a
+  larger value testifies scattered results.
+- Variance :: share of units that lay far from the mean value (outliers).
+
+** Benchmarking IO actions
+Library ~criterion~ has the function ~nfIO~ which takes care of that
+
+#+BEGIN_SRC haskell
+import Criterion.Main
+
+:t nfIO
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+nfIO :: Control.DeepSeq.NFData a => IO a -> Benchmarkable
+#+END_EXAMPLE
+
+#+BEGIN_SRC haskell :eval never
+:{
+readIPRDBFile fname = getDataFileName (ipBenchDir ++ fname)
+                      >>= readFile
+  where
+    ipBenchDir = "data/benchmarks/iplookup/"
+:}
+
+:{
+bench_ranges :: [Benchmark]
+bench_ranges = [
+  bgroup "ranges" [
+      bgroup "read" $
+        map (\(desc, fname) ->
+               bench desc $ nfIO (readIPRDBFile fname))
+        rangeFiles
+      ]
+  where
+    rangeFiles = [("small", "1.iprs"),
+                  ("middle-sized", "2.iprs"),
+                  ("large", "3.iprs")]
+:}
+#+END_SRC
+
+NOTE: always ask yourself "what do you want to benchmark?", if you want to
+benchmark the ~parseIPRanges~ function then you don't want to also consider the
+time to read the file but to read the file first and then benchmark the
+function. A /benchmarking environment/ can be prepared in advance and then used
+in a benchmarking process.
+
+#+BEGIN_SRC haskell
+import Criterion.Main
+
+:t env
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+env
+  :: Control.DeepSeq.NFData env =>
+     IO env -> (env -> Benchmark) -> Benchmark
+#+END_EXAMPLE
+
+#+BEGIN_SRC haskell :eval never
+:{
+bench_ranges :: [Benchmark]
+bench_ranges = [
+  bgroup "ranges" [
+      bgroup "read" $
+        map (\(desc, fname) ->
+                env (readIPRDBFile fname) $
+                \fileContent -> bench desc $ nf parseIPrange fileContent)
+        rangeFiles
+      ]
+  where
+    rangeFiles = [("small", "1.iprs"),
+                  ("middle-sized", "2.iprs"),
+                  ("large", "3.iprs")]
+:}
+#+END_SRC
+
+* 10.2 Profiling execution time and memory usage
+Profiling allows us to get information about time and memory usage of our code.
+
+- How much time the program spends in a particular function.
+- How much time is required to evaluate the expression we are interested in.
+- How much memory is allocated at run time in total and by a particular function.
+- How much memory is allocated on the heap at a particular moment in time
+  (/memory residence/).
+
+To run a profiler
+
+#+BEGIN_SRC shell
+cabal run executable-name -- +RTS -s
+#+END_SRC
+
+To have more data you need to compile/run with profiling information
+
+#+BEGIN_SRC shell
+stack build --profile
+stack run --profile -- executable-name
+
+cabal build executable-name --enable-profiling
+cabal run executable-name --enable-profiling -- +RTS -P
+#+END_SRC
+
+NOTE: for a function to become a /cost center/ we can a special pragma in the
+code
+
+#+BEGIN_SRC haskell :eval never
+:{
+simulate iprdb ips = (yes, no)
+  where
+    yes = {-# SCC "answer yes" #-}
+      length $ filter id $ map (lookupIP iprdb) ips
+    no = {-# SCC "answer no" #-}
+      length ips - yes
+:}
+#+END_SRC
+
+ASK: why only removing ~length ips~ resulted in a constant memory usage?
+
+* 10.3 Tuning performance of the IPv4 filtering application
+We have two issues:
+- Almost all the time is spent in ~lookupIP~ which traverses over the list of
+  ranges for every IP to filter
+- The ~parseIP~ function is doing too much (~ 14%) memory allocation
+
+** Choosing the right data structure
+Switch from linear search over the list of IPs ranges to logarithmic search over
+some tree of ranges.
+
+We will use the ~fingertree~ package and the related data structure [[https://en.wikipedia.org/wiki/Finger_tree][Finger Tree]].
+
+#+BEGIN_SRC haskell :eval never
+newtype FastIPRangeDB = IPRDB (IntervalMap IP ())
+
+:{
+fromIPRangeDB :: IPRangeDB -> FastIPRangeDB
+fromIPRangeDB (IPRangeDB iprdb) = IPRDB $ foldr ins empty iprdb
+  where
+    ins (IPRange ip1 ip2) = insert (Interval ip1 ip2) ()
+:}
+
+:{
+lookupIP :: FastIPRangeDB -> IP -> Bool
+lookupIP (IPRDB imap) ip = not $ null $ search ip imap
+:}
+#+END_SRC
+
+NOTE: this is not an Haskell specific optimization
+
+** Squeezing parseIP performance
+Turn the monadic and abstract implementation of ~parseIP~ into a low level and
+iterative implementation with strictness (bang pattern) on the accumulators. The
+iterative implementation is 100 times faster.
+
+* Summary
+- Benchmark to compare different implementations.
+- Library ~criterion~ is de facto standard tool for benchmarking.
+- Profiling gives us information about the most resource demanding components of
+  the code and point at where to start to optimize.
+- Profiling heap usage saves us from memory leaks.
+- Tests keep confidence in the correctness of our code while doing
+  optimizations.
+
+* Exercises
+- I'm sure this stuff will get in handy when we will implement our CHIP-8
+  emulator.
