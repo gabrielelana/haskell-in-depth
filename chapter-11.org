@@ -1,0 +1,1209 @@
+#+TITLE: Type System Advances
+
+#+PROPERTY: header-args:haskell :results replace output
+#+PROPERTY: header-args:haskell+ :noweb yes
+#+PROPERTY: header-args:haskell+ :wrap EXAMPLE
+
+- Classifying program entities: terms, types and kinds.
+- Specifying code behaviour with a bunch of type-level features.
+- Dealing with type errors
+
+* 11.1 Haskell types 101
+- /terms/ are classified by /types/
+- /types/ are classified by /kinds/
+
+Originally the almost only kind name was ~*~ but was too limited, therefore now
+we have an extension (~NoStarIsType~, [[https://downloads.haskell.org/ghc/9.0.1/docs/html/users_guide/exts/poly_kinds.html][see this]]) which give us more kinds:
+- ~Type~ which is the kind of ~Integer~
+- ~Type -> Type~ which is the kind of ~Maybe~
+- ~Type -> Constraint~ which is the kind of ~Fractional~ (so we are able to tell
+  the kind of type classes)
+- ~(Type -> Type) -> Constraint~ which is the kind of ~Monad~
+
+#+BEGIN_SRC haskell
+:set -XNoStarIsType
+
+:kind Integer
+:kind Maybe
+:kind Fractional
+:kind Monad
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+Integer :: Type
+Maybe :: Type -> Type
+Fractional :: Type -> Constraint
+Monad :: (Type -> Type) -> Constraint
+#+END_EXAMPLE
+
+NOTE: We are not allowed to ask the kind of ~Maybe a~ or ~Monad m~ because ~a~
+or ~m~ are not defined. We can define them explicitly right in the type using
+~ExplicitForAll~ GHC extension ([[https://ghc.gitlab.haskell.org/ghc/doc/users_guide/exts/explicit_forall.html][see this]]).
+
+#+BEGIN_SRC haskell
+:set -XNoStarIsType
+:set -XExplicitForAll
+
+:kind forall a. Maybe a
+:kind forall m. Monad m
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+forall a. Maybe a :: Type
+forall m. Monad m :: Constraint
+#+END_EXAMPLE
+
+NOTE: ~Type~ and ~Constraint~ are not available can be imported from ~Data.Kind~
+
+- ~Type~ doesn't have a type (is not a term) but has a kind which is ~Type~
+- ~Constraint~ has a kind ~Constraint~
+- So kinds are type which have kinds
+
+#+BEGIN_SRC haskell
+:set -XNoStarIsType
+:set -XExplicitForAll
+
+import Data.Kind
+
+:kind Type
+:kind Constraint
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+Type :: Type
+Constraint :: Type
+#+END_EXAMPLE
+
+** Deliver information with types
+
+NOTE: can we have a type of kind ~Type~ which don't have terms? Yes, we can use
+them to deliver type information without the need for a term.
+
+*** Phantom Parameter and Empty Types
+#+NAME: temperature
+#+BEGIN_SRC haskell :eval never
+:set -XGeneralizedNewtypeDeriving
+
+-- u is a Phantom Parameter
+newtype Temp u = Temp Double deriving (Num, Fractional)
+
+-- the following types are Empty Types. They have empty declaration
+-- and no value. They represent respectively units Celsius and Fahrenheit
+data C
+data F
+
+:{
+paperBurning :: Temp F
+paperBurning = 451
+:}
+
+:{
+absoluteZero :: Temp C
+absoluteZero = -273.15
+:}
+#+END_SRC
+
+NOTE: unfortunately we have no constraints on the kind of type we give to ~Temp~
+type constructor, therefore we can have a type ~Temp Boolean~ which doesn't make
+any sense.
+
+ASK: why can I say that `65` has type `Temp C` without using the data
+constructor `Temp`? Is it because it's a `newtype`?
+
+#+BEGIN_SRC haskell
+<<temperature>>
+:t 65
+:t 65 :: Temp C
+:t 65 :: Temp F
+:t Temp 65
+:k Temp
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+> > > > > > > > > | | | > > | | | > > > > 65 :: Num a => a
+65 :: Temp C :: Temp C
+65 :: Temp F :: Temp F
+Temp 65 :: forall {k} {u :: k}. Temp u
+Temp :: k -> Type
+#+END_EXAMPLE
+
+*** Proxy
+Sometimes we may or may not have a value of a type but we don't need it, we only
+need the type. When we are in this situation we can use the type ~Proxy~ from
+~Data.Proxy~
+
+NOTE: to define the same function (~unitName~) for different types we have to
+use type classes and related instances. In Haskell we don't have pattern
+matching over types. Ex. if we want to define a way to provide different JSON
+schemas for different types we need to define a type class and instead of
+providing an instance of the type as parameter we will provide a ~Proxy~ of it
+
+#+BEGIN_SRC haskell :eval never
+class JSONSchema a where
+  schema :: Proxy a -> Schema
+#+END_SRC
+
+We want to define a type class ~UnitName~ to get the name of our temperature
+units. Again, a kind of overloaded function selected by type where the value is
+not needed, therefore we will use a ~Proxy~
+
+#+BEGIN_SRC haskell
+<<temperature>>
+
+:set -XScopedTypeVariables
+
+import Data.Proxy
+
+:{
+class UnitName u where
+  unitName :: Proxy u -> String
+:}
+
+:{
+instance UnitName C where
+  unitName _ = "C"
+:}
+
+:{
+instance UnitName F where
+  unitName _ = "F"
+:}
+
+:{
+instance UnitName u => UnitName (Temp u) where
+  unitName _ = unitName (Proxy :: Proxy u)
+:}
+
+unitName (Proxy :: Proxy C)
+unitName (Proxy :: Proxy F)
+unitName (Proxy :: Proxy (Temp C))
+unitName (Proxy :: Proxy (Temp F))
+
+:{
+instance UnitName u => Show (Temp u) where
+  show (Temp t) = show t ++ "°" ++ unitName (Proxy :: Proxy u)
+:}
+
+zero = 0 :: Temp C
+zero
+
+-- If we have a value we can always get the unitName out of it
+
+:{
+unit :: forall u. UnitName u => Temp u -> String
+unit _ = unitName (Proxy :: Proxy u)
+:}
+
+unit zero
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+"C"
+F
+C
+F
+0.0°C
+"C"
+#+END_EXAMPLE
+
+*** Type Applications
+With use of ~TypeApplications~ and ~AllowAmbiguousTypes~ we can rewrite the
+~UnitName~ class by providing types through type application.
+
+#+BEGIN_SRC haskell
+<<temperature>>
+
+:set -XTypeApplications
+:set -XAllowAmbiguousTypes
+
+:{
+class UnitName u where
+  unitName :: String
+:}
+
+:{
+instance UnitName C where
+  unitName = "C"
+:}
+
+:{
+instance UnitName F where
+  unitName = "F"
+:}
+
+:{
+instance UnitName u => UnitName (Temp u) where
+  unitName = unitName @u
+:}
+
+:{
+instance UnitName u => Show (Temp u) where
+  show (Temp t) = show t ++ "°" ++ unitName @u
+:}
+
+unitName @C
+unitName @F
+unitName @(Temp C)
+unitName @(Temp F)
+
+zero = 0 :: Temp C
+
+show zero
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+"C"
+F
+C
+F
+"0.0\176C"
+#+END_EXAMPLE
+
+*** Type Operators
+A purely syntactic way of giving nice names to types.
+
+#+BEGIN_SRC haskell
+:set -XTypeOperators
+
+-- NOTE: need to define it in the same statement in GHCi
+
+:{
+data a + b = Inl a | Inr b deriving Show
+
+data a * b = a :*: b deriving Show
+
+infixl 6 + -- lower precedence to + like the arithmetic one
+infixl 7 *
+:}
+
+:{
+val1 :: Int + Bool * Bool
+val1 = Inl 0
+:}
+
+:{
+val2 :: Int + Bool * Bool
+val2 = Inr (True :*: False)
+:}
+
+val1
+val2
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+Inl 0
+Inr (True :*: False)
+#+END_EXAMPLE
+
+* 11.2 Data kinds and type-level literals
+** DataKinds
+We will define new kinds besides ~Type~ and ~Constratint~
+
+Back to the temperature example. What we would like to have is:
+- One type to store different temperature units. (with ~Proxy~: OK)
+- Compile time check of not mixing them up. (with ~Proxy~: OK)
+- A fixed list of units. (with ~Proxy~: KO)
+
+The idea is to bring data type values to the type level with ~DataKinds~
+
+#+BEGIN_SRC haskell
+:set -XDataKinds
+:set -XGeneralizedNewtypeDeriving
+:set -XNoStarIsType
+:set -XTypeApplications
+
+data TempUnits = Fa | Ce
+
+-- With DataKinds enable we have defined
+-- 1. TempUnits data type with F and C values
+-- 2. TempUnits data kind with F and C types
+-- We say that F and C values are /promoted/ to types.
+
+
+-- NOTE: (u :: TempUnits) means that `u` type will be limited
+-- to a specific kind `TempUnits` so that the only possible values
+-- are `F` and `C`
+newtype Temp (u :: TempUnits) = Temp Double deriving (Num, Fractional)
+
+:{
+paperBurning :: Temp Fa
+paperBurning = 451
+:}
+
+:{
+absoluteZero :: Temp Ce
+absoluteZero = -273.15
+:}
+
+:{
+class UnitName (u :: TempUnits) where
+  unitName :: String
+:}
+
+:{
+instance UnitName Ce where
+  unitName = "C"
+:}
+
+:{
+instance UnitName Fa where
+  unitName = "F"
+:}
+
+-- DISCUSS: cannot instance UnitName for Temp???
+
+-- :{
+-- instance UnitName u => UnitName (Temp u) where
+--   unitName = unitName @ u
+-- :}
+
+:{
+instance UnitName u => Show (Temp u) where
+  show (Temp t) = show t ++ "°" ++ unitName @u
+:}
+
+
+:t Fa
+:k Fa
+0 :: Temp Fa
+0 :: Temp Ce
+
+-- NOTE: cannot create something nonsensical
+0 :: Temp Bool
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+Fa :: TempUnits
+Fa :: TempUnits
+0.0°F
+0.0°C
+
+<interactive>:4163:11: error:
+    • Expected kind ‘TempUnits’, but ‘Bool’ has kind ‘Type’
+    • In the first argument of ‘Temp’, namely ‘Bool’
+      In an expression type signature: Temp Bool
+      In the expression: 0 :: Temp Bool
+#+END_EXAMPLE
+
+The extension ~DataKinds~ promotes data type definitions to the level of types as follows:
+- Type constructors become kind constructors
+- Data constructors become type constructors
+
+** Type-level literals
+Using ~DataKinds~ in ~GHC.TypeLits~ we have a bunch of kinds defined
+
+#+BEGIN_SRC haskell
+:set -XDataKinds
+:set -XNoStarIsType
+
+import GHC.TypeLits
+
+:k 42
+:k Nat
+:k Natural
+:k "hello"
+:k Symbol
+
+-- It is also possible to use list literals for list a the type level
+
+:k []
+:k [Int, String, Bool]
+:k [42, 33]
+:k ["hello", "world"]
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+42 :: Natural
+Nat :: Type
+Natural :: Type
+"hello" :: Symbol
+Symbol :: Type
+[] :: Type -> Type
+[Int, String, Bool] :: [Type]
+[42, 33] :: [Natural]
+["hello", "world"] :: [Symbol]
+#+END_EXAMPLE
+
+*** How to use kinds like ~Nat~ at value level?
+
+#+BEGIN_SRC haskell
+:set -XDataKinds
+:set -XNoStarIsType
+:set -XTypeApplications
+:set -XScopedTypeVariables
+
+import GHC.TypeLits
+import Data.Proxy
+
+-- To have the real address you need to multiply the address ~Integer~
+-- Given at value level with the alignment value given at type level.
+newtype Pointer (alignment :: Nat) = Pointer Integer deriving Show
+
+:{
+zeroPointer :: Pointer n
+zeroPointer = Pointer 0
+:}
+
+-- Here we have the guarantee that the alignment (~n~)
+-- doesn't change with the operation
+:{
+incPointer :: Pointer n -> Pointer n
+incPointer (Pointer a) = Pointer $ a + 1
+:}
+
+-- Here we take the alignment value from type level to term level
+-- with ~KnownNat~ type class
+:{
+pointerValue :: forall n. KnownNat n => Pointer n -> Integer
+-- ASK: doesn't work, why?
+-- pointerValue (Pointer p) = p * natVal (Proxy @(Proxy n))
+pointerValue (Pointer p) = p * natVal (Proxy :: Proxy n)
+:}
+
+:{
+maybePointer :: forall n. KnownNat n => Integer -> Maybe (Pointer n)
+maybePointer x
+  | x `mod` (natVal (Proxy :: Proxy n)) == 0 = Just $ Pointer x
+  | otherwise                                = Nothing
+:}
+
+-- ASK: doens't work, why?
+-- pointerValue (incPointer $ zeroPointer @(Pointer 8))
+pointerValue (incPointer $ zeroPointer :: Pointer 4)
+pointerValue (incPointer $ zeroPointer :: Pointer 8)
+
+maybePointer 24 :: Maybe (Pointer 8)
+maybePointer 42 :: Maybe (Pointer 8)
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+4
+8
+Just (Pointer 24)
+Nothing
+#+END_EXAMPLE
+
+*** How to use kinds like ~Symbol~ at value level?
+
+#+BEGIN_SRC haskell
+:set -XDataKinds
+:set -XNoStarIsType
+:set -XTypeApplications
+:set -XScopedTypeVariables
+:set -XOverloadedStrings
+
+import GHC.TypeLits
+import Data.Proxy
+
+-- We have IDs which are made of `{username}@{department}`. We want to
+-- keep the username at term level and department at type level, so that
+-- we can check operations between departments according to department
+-- policies
+
+data SuffixedString (suffix :: Symbol) = SS String
+
+-- Create a value of this type, avoid to export `SS` data constructor
+:{
+suffixed :: String -> SuffixedString suffix
+suffixed = SS
+:}
+
+:{
+asString :: forall suffix. KnownSymbol suffix => SuffixedString suffix -> String
+asString (SS s) = s ++ "@" ++ (symbolVal (Proxy :: Proxy suffix))
+:}
+
+asString (suffixed "chiara" :: SuffixedString "administration")
+asString (suffixed "gabriele" :: SuffixedString "developers")
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+"chiara@administration"
+gabriele@developers
+#+END_EXAMPLE
+
+* 11.3 Computations over types with type families
+[[https://serokell.io/blog/type-families-haskell][From here]]
+
+In Haskell, there are several categories to which a given type constructor ~T~
+may belong:
+- data type: ~data T a b = ...~
+- newtype: ~newtype T a b = ...~
+- type class: ~class T a b where ...~
+- type synonym: ~typel T a b = ...~
+
+The ~TypeFamilies~ extension introduces two more categories:
+- type family: ~type family T a b where ...~
+- data family: ~data family T a b = ...~
+
+** Synonym Families
+Type synonym families come in two flavors:
+- /open/ it's allowed to add new instances everywhere.
+- /closed/ when there's a closed list of instances.
+
+*** Open Synonym Families
+Mapping types to other types leaving the map open
+
+#+BEGIN_SRC haskell
+:set -XTypeFamilies
+:set -XDataKinds
+:set -XNoStarIsType
+
+-- Type family declaration
+-- `Simplify` is the name of the type familiy
+-- `t` is the type parameter
+type family Simplify t
+
+-- Here the instances
+type instance Simplify Integer = Integer
+type instance Simplify Int     = Integer
+type instance Simplify Double  = Integer
+type instance Simplify String  = String
+type instance Simplify Char    = String
+type instance Simplify Bool    = String
+
+-- Can be added others wherever you want
+
+:kind Simplify
+:kind Simplify Int
+
+-- NOTE: :kind! forces GHC to reduce a type family application
+-- NOTE: TypeFamilies extension implies KindSignatures -> PolyKinds -> DataKinds
+:kind! Simplify Int
+:kind! Simplify Bool
+
+-- This describes the transformation at level of type, we still need to
+-- describe the transformation at level of terms. As always, when you want
+-- a function which works with different types you have to define a type class.
+
+:{
+class Simplifier t where
+  simplify :: t -> Simplify t -- NOTE: the type of `Simplify t` will be reduced given `t`
+
+instance Simplifier Integer where
+  simplify = id
+
+instance Simplifier Int where
+  simplify = fromIntegral -- Int -> Integer
+
+instance Simplifier Double where
+  simplify = round -- Double -> Integer
+
+instance Simplifier String where
+  simplify = id -- String -> String
+
+instance Simplifier Char where
+  simplify = (:"") -- Char -> String
+
+instance Simplifier Bool where
+  simplify = show
+:}
+
+simplify (3.14 :: Double)
+simplify True
+simplify 'X'
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+Simplify :: Type -> Type
+Simplify Int :: Type
+Simplify Int :: Type
+= Integer
+Simplify Bool :: Type
+= [Char]
+3
+True
+X
+#+END_EXAMPLE
+
+*** Closed Synonym Family
+#+BEGIN_SRC haskell
+:set -XTypeFamilies
+:set -XDataKinds
+:set -XNoStarIsType
+
+import Data.List (singleton)
+
+-- Cannot add any other instances
+:{
+type family Widen a where
+  Widen Bool = Int
+  Widen Int = Integer
+  Widen Char = String
+  Widen t = String
+:}
+
+-- Again we need to transform also terms
+:{
+class Widener a where
+  widen :: a -> Widen a
+
+instance Widener Bool where
+  widen True = 1
+  widen False = 0
+
+instance Widener Int where
+  widen = fromIntegral
+
+instance Widener Char where
+  widen = singleton
+:}
+
+widen False
+widen True
+widen 'X'
+:t widen (10 :: Int)
+
+:kind! Widen Double
+
+-- ASK: he is not reducing `Widen a` at the end, why?
+:kind! forall a. Show a => Widen a
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+0
+1
+X
+widen (10 :: Int) :: Integer
+Widen Double :: Type
+= [Char]
+forall a. Show a => Widen a :: Type
+= Show a => Widen a
+#+END_EXAMPLE
+
+** Data Families
+With data families we define new data types for every instance. Data families
+are always open.
+
+#+BEGIN_SRC haskell
+:set -XTypeFamilies
+:set -XDataKinds
+:set -XNoStarIsType
+
+-- Declaration of the data familiy
+data family XList a
+
+-- Instances. To provide instances we can use `data` or `newtype`
+
+-- For an optimized list of unit we can use a simple counter
+newtype instance XList () = XUnits Integer
+
+-- For an optimized list of booleans we can use an Integer as bitfield
+-- and another integer to count the number of elements in the list
+data instance XList Bool = XBits Integer Integer
+
+-- `XUnits` is a data constructor which creates values of type `XList ()`
+-- `XBits` is a data constructor which creates values of type `XList Bool`
+
+-- To define functions able to work with instances of this data family we
+-- need to defined them in a type class
+
+:{
+class XListable a where
+  xempty :: XList a
+  xcons :: a -> XList a -> XList a
+  xhead :: XList a -> Maybe a
+  xcount :: XList a -> Int
+
+instance XListable () where
+  xempty = XUnits 0
+  xcons _ (XUnits n) = XUnits $ n + 1
+  xhead (XUnits 0) = Nothing
+  xhead (XUnits n) = Just ()
+  xcount (XUnits n) = fromIntegral n
+
+instance XListable Bool where
+  xempty = XBits 0 0
+  xcons a (XBits b n) = XBits (b * 2 + toBits a) (n + 1)
+    where toBits True = 1
+          toBits False = 0
+  xhead (XBits b 0) = Nothing
+  xhead (XBits b n) = Just $ b `mod` 2 /= 0
+  xcount (XBits _ n) = fromIntegral n
+:}
+
+-- Let's work with them
+
+:{
+testXList :: (Eq a, XListable a) => a -> Bool
+testXList a = xhead (xcons a xempty) == Just a
+:}
+
+testXList ()
+testXList True
+testXList False
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+True
+True
+True
+#+END_EXAMPLE
+
+NOTE: data families serves as regular data types while providing different
+run-time representations depending on the type parameters.
+
+** Associated Families
+Are type families associated to a type class. Should be used when the existence
+of an instance of a type family is related to the existence of an instance of a
+type class.
+
+#+BEGIN_SRC haskell
+:set -XTypeFamilies
+:set -XDataKinds
+:set -XNoStarIsType
+
+import Data.ByteString hiding (pack)
+import Data.ByteString.Char8 (pack)
+import Data.Word
+
+:{
+type family Elem a
+
+class Container a where
+  elements :: a -> [Elem a]
+
+type instance Elem [a] = a
+instance Container [a] where
+  elements = id
+
+type instance Elem ByteString = Word8
+instance Container ByteString where
+  elements = unpack
+:}
+
+elements "Foo"
+elements (pack "Foo")
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+Foo
+[70,111,111]
+#+END_EXAMPLE
+
+In the previous example it's useless to have an instance of ~Elem a~ for ~a~ if
+don't have an instance of ~Container a~ for the same ~a~
+
+Enter the associated type families
+
+#+BEGIN_SRC haskell
+:set -XTypeFamilies
+:set -XDataKinds
+:set -XNoStarIsType
+
+import Data.ByteString hiding (pack)
+import Data.ByteString.Char8 (pack)
+import Data.Word
+
+:{
+class Container a where
+  type Elem a
+  elements :: a -> [Elem a]
+
+instance Container [a] where
+  type Elem [a] = a
+  elements = id
+
+instance Container ByteString where
+  type Elem ByteString = Word8
+  elements = unpack
+:}
+
+elements "Foo"
+elements (pack "Foo")
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+Foo
+[70,111,111]
+#+END_EXAMPLE
+
+* 11.4 Generalized algebraic data types
+From the book: we cannot write a function returning String, Number or Bool,
+depending on the content of a list of ~Dyn~
+
+???
+
+#+BEGIN_SRC haskell
+data Dyn = S String | N Integer | B Bool deriving Show
+
+:{
+inspect :: Dyn -> String
+inspect (S _) = "String"
+inspect (N _) = "Number"
+inspect (B _) = "Bool"
+:}
+
+:{
+pp :: Dyn -> String
+pp (S s) = s
+pp (N n) = show n
+pp (B b) = show b
+:}
+
+inspect <$> [S "Hello", N 42, S "World", B True]
+pp <$> [S "Hello", N 42, S "World", B True]
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+["String","Number","String","Bool"]
+["Hello","42","World","True"]
+#+END_EXAMPLE
+
+It's true though that we cannot write a function which can only take ~S _~
+
+NOTE: Data constructors (like ~S~, ~N~ and ~B~ above) of the same data
+declaration will always return a value of the same type
+
+- ~S :: String -> Dyn~
+- ~N :: Integer -> Dyn~
+- ~B :: Bool -> Dyn~
+
+NOTE: generalized algebraic data types lift these limitations by allowing data
+constructors to return a data type parameterized by the specific types.
+
+#+BEGIN_SRC haskell
+:set -XGADTs
+:set -XTypeApplications
+
+:{
+data Dyn a where
+  S :: String -> Dyn String
+  N :: Integer -> Dyn Integer
+  B :: Bool -> Dyn Bool
+
+-- Could not be written without GADTs
+unwrap :: Dyn a -> a
+unwrap (S s) = s
+unwrap (N n) = n
+unwrap (B b) = b
+
+:}
+
+:t unwrap
+:t unwrap @String
+:t unwrap @Bool
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+unwrap :: Dyn a -> a
+unwrap @String :: Dyn String -> String
+unwrap @Bool :: Dyn Bool -> Bool
+#+END_EXAMPLE
+
+NOTE: we cannot have ~[S "Hello", N 42, S "World", B True]~ because it should
+have type ~[Dyn a]~ and it's not true that we can have a type ~Dyn a~ for every ~a~
+but only for String, Integer and Bool. Therefore we can only have a list of
+value of the same type ~[S "Hello", S "World"]~ which is of type ~[Dyn String]~
+
+NOTE: we cannot have a function ~a -> Dyn a~ because we cannot create a ~Dyn a~
+for every ~a~ but only for ~String~, ~Integer~ and ~Bool~. We can hide the type
+~Dyn a~ for every supported ~a~ in a value using ~GADT~ extension.
+
+#+BEGIN_SRC haskell
+:set -XGADTs
+:set -XTypeApplications
+
+:{
+data Dyn a where
+  S :: String -> Dyn String
+  N :: Integer -> Dyn Integer
+  B :: Bool -> Dyn Bool
+
+data WrappedDyn where
+  Wrap :: Dyn a -> WrappedDyn -- Data constructor that will carry `a`
+
+-- NOTE: this works because `a` is automatically existentially quantified
+-- because of GADT, the same thing can be written as
+data WrappedDyn' = forall a. Dyn a
+:}
+
+:k WrappedDyn
+:k Dyn String
+:k Dyn
+
+:{
+fromString :: String -> WrappedDyn
+fromString s
+  | s `Prelude.elem` ["y", "yes", "true"] = Wrap (B True)
+  | s `Prelude.elem` ["n", "no", "false"] = Wrap (B False)
+  | Prelude.all Data.Char.isDigit s = Wrap (N $ read s)
+  | otherwise = Wrap (S s)
+
+-- ASK: why cannot unwrap, the following doesn't compile
+-- The hidden `a` in `WrappedDyn` cannot be taken out?
+
+-- unwrap :: WrappedDyn -> a
+-- unwrap (Wrap (S s)) = s
+-- unwrap (Wrap (N n)) = n
+-- unwrap (Wrap (B b)) = b
+
+-- unwrap' :: WrappedDyn -> Dyn a
+-- unwrap' (Wrap a) = a
+-- unwrap' (Wrap a) = a
+-- unwrap' (Wrap a) = a
+
+printWrap :: WrappedDyn -> IO ()
+printWrap (Wrap (S s)) = print s
+printWrap (Wrap (N n)) = print n
+printWrap (Wrap (B b)) = print b
+:}
+
+printWrap (fromString "y")
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+WrappedDyn :: Type
+Dyn String :: Type
+Dyn :: Type -> Type
+True
+#+END_EXAMPLE
+
+GADT main points:
+- Additional control by keeping specific types as parameters to a GADT type
+  constructor.
+- Always get back to the original types.
+- Use existential typing techniques to build GADTs from other types and pass
+  those wrapped types around until we need the power of the original types.
+
+DISCUSS: "until we need the power of the original types"??? But ~unwrap ::
+WrappedDyn -> a~ doesn't compile, how can you go back to the original type?
+
+** Arithmetic expression example
+
+Plain encoding of arithmetic expression
+#+BEGIN_SRC haskell
+:{
+data Expr a = Lit a
+            | Add (Expr a) (Expr a)
+            | Mul (Expr a) (Expr a)
+
+eval :: Num a => Expr a -> a
+eval (Lit a) = a
+eval (Add e1 e2) = eval e1 + eval e2
+eval (Mul e1 e2) = eval e1 * eval e2
+:}
+
+eval (Add (Lit 1) (Lit 2))
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+3
+#+END_EXAMPLE
+
+Same expressions with GADT
+#+BEGIN_SRC haskell
+:set -XGADTs
+
+:{
+data Expr a where
+  Lit :: a -> Expr a
+  Add :: Expr a -> Expr a -> Expr a
+  Mul :: Expr a -> Expr a -> Expr a
+
+eval :: Num a => Expr a -> a
+eval (Lit a) = a
+eval (Add e1 e2) = eval e1 + eval e2
+eval (Mul e1 e2) = eval e1 * eval e2
+:}
+
+eval (Add (Lit 1) (Lit 2))
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+3
+#+END_EXAMPLE
+
+GADT will let us specify types and constraint for each constructor. Therefore we
+can have expression which works only on booleans.
+#+BEGIN_SRC haskell
+:set -XGADTs
+
+:{
+data Expr a where
+  LitN :: Num a => a -> Expr a
+  LitB :: Bool -> Expr Bool
+  Add :: Num a => Expr a -> Expr a -> Expr a
+  Mul :: Num a => Expr a -> Expr a -> Expr a
+  IsZero :: (Num a, Eq a) => Expr a -> Expr Bool
+  If :: Expr Bool -> Expr a -> Expr a -> Expr a
+
+eval :: Expr a -> a
+eval (LitN n) = n
+eval (LitB b) = b
+eval (Add e1 e2) = eval e1 + eval e2
+eval (Mul e1 e2) = eval e1 + eval e2
+eval (IsZero e) = (eval e) == 0
+eval (If eb e1 e2) = if eval eb then eval e1 else eval e2
+:}
+
+eval $ If (IsZero $ Add (LitN 5) (LitN (-5))) (LitN 1) (LitN 2)
+eval $ IsZero (LitB True)
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+1
+<interactive>:1409:8: error:
+    • No instance for (Num Bool) arising from a use of ‘IsZero’
+    • In the second argument of ‘($)’, namely ‘IsZero (LitB True)’
+      In the expression: eval $ IsZero (LitB True)
+      In an equation for ‘it’: it = eval $ IsZero (LitB True)
+#+END_EXAMPLE
+
+* 11.5 Arbitrary-rank polymorphism
+** Meaning
+#+BEGIN_SRC haskell
+:{
+inc :: Num a => a -> a
+inc = (+) 1
+
+succ :: Int -> Int
+succ = inc
+
+process :: (Int -> Int) -> [Int] -> [Int]
+process = Prelude.map
+:}
+
+-- I can use inc :: Num a => a -> a
+process inc [1, 2, 3]
+
+-- But also fromIntegral
+process fromIntegral [1, 2, 3]
+:t fromIntegral
+:t process fromIntegral [1, 2, 3]
+
+-- Or succ
+:t succ
+:t process succ [1, 2, 3]
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+[2,3,4]
+[1,2,3]
+fromIntegral :: (Integral a, Num b) => a -> b
+process fromIntegral [1, 2, 3] :: [Int]
+succ :: Int -> Int
+process succ [1, 2, 3] :: [Int]
+#+END_EXAMPLE
+
+NOTE: If I want to be given only function that works exactly on a ~Num a~ as
+~inc :: Num a => a -> a~ then we need ~RankNTypes~
+
+#+BEGIN_SRC haskell
+:set -XRankNTypes
+
+:{
+inc :: Num a => a -> a
+inc = (+) 1
+
+succ :: Int -> Int
+succ = inc
+
+process :: (forall a. Num a => a -> a) -> [Int] -> [Int]
+process f xs = map f xs
+:}
+
+-- Good
+process inc [1, 2, 3]
+
+-- Bad: (`Int -> Int` is not `Num a => a -> a`)
+process succ [1, 2, 3]
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+[2,3,4]
+<interactive>:96:9: error:
+    • Couldn't match type ‘a’ with ‘Int’
+      Expected: a -> a
+        Actual: Int -> Int
+      ‘a’ is a rigid type variable bound by
+        a type expected by the context:
+          forall a. Num a => a -> a
+        at <interactive>:96:9-12
+    • In the first argument of ‘process’, namely ‘succ’
+      In the expression: process succ [1, 2, 3]
+      In an equation for ‘it’: it = process succ [1, 2, 3]
+#+END_EXAMPLE
+
+NOTE: The /rank/ is the count of polymorphic declarations in function arguments
+before ~->~. If some function takes a rank-N polymorphic function then it's at
+least a rank-N+1 function.
+
+- ~(Int -> Int) -> Int -> Int~ is rank 0
+- ~forall a. Num a => _a_ -> a -> Int -> Int~ is rank 1
+- ~(forall a. Num a => _a_ -> _a_) -> Int -> Int~ is rank 2
+- ~((forall a. Num a => _a_ -> _a_) -> Int) -> Int -> Int~ is rank 3 (rank 2 + 1)
+
+** Usage
+*** Abstracting Interfaces
+#+BEGIN_SRC haskell
+:set -XRankNTypes
+
+:{
+newtype NumModifier = NumModifier {
+  run :: forall a. Num a => a -> a
+}
+
+process :: NumModifier -> [Int] -> [Int]
+process f xs = map (run f) xs
+:}
+
+process (NumModifier (+1)) [1, 2, 3]
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+[2,3,4]
+#+END_EXAMPLE
+
+*** Masking Exceptions
+TODO
+
+*** Stateful Computations in ST Monad
+TODO
+
+* 11.6 Advice on dealing with type errors
+How to make type level programming in Haskell less painful?
+
+- Be explicit about types, especially for top level declarations. You can also
+  use /local type signatures/ to "type" some complex expression to see if the
+  compiler agrees.
+- Ask the compiler with /holes/ in expressions (aka use ~_~ (or a variable name
+  prefixed with ~_~) instead of an expression) to ask the type of the hole.
+- Use ~-fprint-explicit-foralls~ or other ~-fprint-*~ compilation flags to have
+  less hidden information in compiler errors.
+
+* Summary
+TODO
+
+* Exercises
+- Read [[https://downloads.haskell.org/ghc/9.0.1/docs/html/users_guide/exts/poly_kinds.html][Kind polymorphism]]
+- Read [[https://ghc.gitlab.haskell.org/ghc/doc/users_guide/exts/explicit_forall.html][Explicit universal quantification]]
+- Read [[https://ghc.gitlab.haskell.org/ghc/doc/users_guide/exts/data_kinds.html][DataKinds extension]]
+- Read [[https://serokell.io/blog/datakinds-are-not-what-you-think][DataKinds are not what you think]]
+- Read [[https://serokell.io/blog/type-families-haskell][Type Families Guide]]
+- Read [[https://wiki.haskell.org/GHC/Type_families][Type Families (Haskell Wiki)]]
