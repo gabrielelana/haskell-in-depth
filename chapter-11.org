@@ -55,11 +55,12 @@ forall a. Maybe a :: Type
 forall m. Monad m :: Constraint
 #+END_EXAMPLE
 
-NOTE: ~Type~ and ~Constraint~ are not available can be imported from ~Data.Kind~
+NOTE: ~Type~ and ~Constraint~ are not available in ~Prelude~ but they can be
+imported from ~Data.Kind~
 
 - ~Type~ doesn't have a type (is not a term) but has a kind which is ~Type~
-- ~Constraint~ has a kind ~Constraint~
-- So kinds are type which have kinds
+- ~Constraint~ has a kind ~Type~
+- So kinds are types which have kinds
 
 #+BEGIN_SRC haskell
 :set -XNoStarIsType
@@ -79,8 +80,8 @@ Constraint :: Type
 
 ** Deliver information with types
 
-NOTE: can we have a type of kind ~Type~ which don't have terms? Yes, we can use
-them to deliver type information without the need for a term.
+NOTE: can we have a type of kind ~Type~ which doesn't have terms? Yes, we can
+use them to deliver type information without the need for a term.
 
 *** Phantom Parameter and Empty Types
 #+NAME: temperature
@@ -124,7 +125,7 @@ constructor `Temp`? Is it because it's a `newtype`?
 
 #+RESULTS:
 #+BEGIN_EXAMPLE
-> > > > > > > > > | | | > > | | | > > > > 65 :: Num a => a
+65 :: Num a => a
 65 :: Temp C :: Temp C
 65 :: Temp F :: Temp F
 Temp 65 :: forall {k} {u :: k}. Temp u
@@ -197,6 +198,11 @@ zero
 unit :: forall u. UnitName u => Temp u -> String
 unit _ = unitName (Proxy :: Proxy u)
 :}
+
+-- DISCUSS: I always assumed I could use a type parameter in the
+-- signature of a function and use it in the function, because of
+-- the way generic works in other programming languages, but in
+-- Haskell you can do that only with ScopedTypeVariables extension
 
 unit zero
 #+END_SRC
@@ -322,10 +328,9 @@ The idea is to bring data type values to the type level with ~DataKinds~
 data TempUnits = Fa | Ce
 
 -- With DataKinds enable we have defined
--- 1. TempUnits data type with F and C values
--- 2. TempUnits data kind with F and C types
--- We say that F and C values are /promoted/ to types.
-
+-- 1. TempUnits data type with Fa and Ce values
+-- 2. TempUnits data kind with Fa and Ce types
+-- We say that Fa and Ce values are /promoted/ to types.
 
 -- NOTE: (u :: TempUnits) means that `u` type will be limited
 -- to a specific kind `TempUnits` so that the only possible values
@@ -393,7 +398,8 @@ Fa :: TempUnits
       In the expression: 0 :: Temp Bool
 #+END_EXAMPLE
 
-The extension ~DataKinds~ promotes data type definitions to the level of types as follows:
+The extension ~DataKinds~ promotes data type definitions to the level of types
+as follows:
 - Type constructors become kind constructors
 - Data constructors become type constructors
 
@@ -464,8 +470,6 @@ incPointer (Pointer a) = Pointer $ a + 1
 -- with ~KnownNat~ type class
 :{
 pointerValue :: forall n. KnownNat n => Pointer n -> Integer
--- ASK: doesn't work, why?
--- pointerValue (Pointer p) = p * natVal (Proxy @(Proxy n))
 pointerValue (Pointer p) = p * natVal (Proxy :: Proxy n)
 :}
 
@@ -476,8 +480,7 @@ maybePointer x
   | otherwise                                = Nothing
 :}
 
--- ASK: doens't work, why?
--- pointerValue (incPointer $ zeroPointer @(Pointer 8))
+pointerValue (incPointer $ zeroPointer @8)
 pointerValue (incPointer $ zeroPointer :: Pointer 4)
 pointerValue (incPointer $ zeroPointer :: Pointer 8)
 
@@ -487,6 +490,7 @@ maybePointer 42 :: Maybe (Pointer 8)
 
 #+RESULTS:
 #+BEGIN_EXAMPLE
+8
 4
 8
 Just (Pointer 24)
@@ -541,7 +545,7 @@ may belong:
 - data type: ~data T a b = ...~
 - newtype: ~newtype T a b = ...~
 - type class: ~class T a b where ...~
-- type synonym: ~typel T a b = ...~
+- type synonym: ~type T a b = ...~
 
 The ~TypeFamilies~ extension introduces two more categories:
 - type family: ~type family T a b where ...~
@@ -633,6 +637,7 @@ X
 :set -XTypeFamilies
 :set -XDataKinds
 :set -XNoStarIsType
+:set -XUndecidableInstances
 
 import Data.List (singleton)
 
@@ -659,6 +664,10 @@ instance Widener Int where
 
 instance Widener Char where
   widen = singleton
+
+-- ASK: why doesn't work?
+-- instance Show a => Widener a where
+--   widen x = show x
 :}
 
 widen False
@@ -894,7 +903,6 @@ unwrap :: Dyn a -> a
 unwrap (S s) = s
 unwrap (N n) = n
 unwrap (B b) = b
-
 :}
 
 :t unwrap
@@ -910,9 +918,10 @@ unwrap @Bool :: Dyn Bool -> Bool
 #+END_EXAMPLE
 
 NOTE: we cannot have ~[S "Hello", N 42, S "World", B True]~ because it should
-have type ~[Dyn a]~ and it's not true that we can have a type ~Dyn a~ for every ~a~
-but only for String, Integer and Bool. Therefore we can only have a list of
-value of the same type ~[S "Hello", S "World"]~ which is of type ~[Dyn String]~
+have type ~[Dyn a]~ and it's not true that we can have a type ~Dyn a~ for every
+~a~ but only for ~String~, ~Integer~ and ~Bool~. Therefore we can only have a
+list of value of the same type ~[S "Hello", S "World"]~ which is of type ~[Dyn
+String]~
 
 NOTE: we cannot have a function ~a -> Dyn a~ because we cannot create a ~Dyn a~
 for every ~a~ but only for ~String~, ~Integer~ and ~Bool~. We can hide the type
