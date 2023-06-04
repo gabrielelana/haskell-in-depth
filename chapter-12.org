@@ -1,0 +1,550 @@
+#+TITLE: Metaprogramming in Haskell
+
+#+PROPERTY: header-args:haskell :results replace output
+#+PROPERTY: header-args:haskell+ :noweb yes
+#+PROPERTY: header-args:haskell+ :wrap EXAMPLE
+
+- Haskell features to support deriving type class instances.
+- Exploiting a generic representation for any data type to write
+  data-type-generic code.
+- Generating code at compile time.
+
+* 12.1 Deriving instances
+Writing instances for classes can be tedious and repetitive. At the beginning
+Haskell supported instance derivation only for an handful of classes known by
+the compiler. Today in Haskell we have many ways to derive instances.
+
+** 12.1.1 Basic deriving strategies
+- Deriving an instance means generating an implementation for methods of type
+  classes by the compiler.
+- GHC supports several strategies that we can choose.
+- Generate code is type-checked and compiled.
+
+Generated code must be correct otherwise errors for code you didn't write will
+be difficult to understand.
+
+You can look at generated code with ~-ddump-deriv~ flag.
+
+#+BEGIN_SRC haskell :eval never
+instance GHC.Classes.Eq Main.Student where
+  (GHC.Classes.==)
+    (Main.Student a1_a2j7 a2_a2j8)
+    (Main.Student b1_a2j9 b2_a2ja)
+    = (((a1_a2j7 GHC.Classes.== b1_a2j9))
+       GHC.Classes.&& ((a2_a2j8 GHC.Classes.== b2_a2ja)))
+#+END_SRC
+
+- Full qualification
+- Randomly generated identifiers
+
+Strategies:
+- *stock* specific type classes with deriving algorithms built into GHC (enabled
+  by default).
+- *anyclass* allows to derive empty instances. Makes sense if we have default
+  implementations in type class definition (enabled via ~DeriveAnyClass~
+  extension).
+- *newtype* generates instances for ~newtype~ declarations. The code is the same
+  for the underlying types (enabled via ~GeneralizedNewtypeDeriving~ extension).
+- *via* allows us to give example of how code should be generated (enabled by
+  ~DerivingVia~ extension).
+
+When multiple strategies applies, we have ~DerivingStrategies~ extension to
+specify a strategy explicitly.
+
+ASK: without enabling any strategy via extensions only *stock* is available?
+
+#+BEGIN_SRC haskell
+:set -XDerivingStrategies
+:set -XGeneralizedNewtypeDeriving -- activate newtype strategy
+:set -XDeriveGeneric              -- required by anyclass strategy to derive ToJSON
+:set -XDeriveAnyClass             -- activate anyclass strategy
+
+import GHC.Generics (Generic)
+import Data.Aeson (ToJSON, encode)
+
+:{
+newtype Age = Age {age :: Int}
+  deriving stock (Show, Generic)
+  deriving newtype (Num)
+  deriving anyclass (ToJSON)
+
+theAge :: Age
+theAge = 33
+
+main :: IO ()
+main = do
+  print theAge
+  print $ encode theAge
+:}
+
+main
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+Age {age = 33}
+"{\"age\":33}"
+#+END_EXAMPLE
+
+** 12.1.2 The problem of type safe and generalized newtype deriving
+How to make sure that derived classes are type safe?
+
+With the following declaration ~Age~ and ~Int~ shares the same run-time
+representation. So it will be desirable to have the same run-time representation
+for ~[Int]~ and ~[Age]~. If that's the case then ~toAges~ it does nothing? Is
+GHC smart enough to skip ~map~?
+
+If we have types that share the run-time representation, we can use ~coerce~
+(from ~Data.Coerce~) between them.
+
+#+BEGIN_SRC haskell
+:set -XExplicitForAll
+:set -XKindSignatures
+
+import Data.Coerce (coerce)
+
+:{
+newtype Age = Age Int
+  deriving (Show)
+
+toAges :: [Int] -> [Age]
+toAges = map Age
+
+toAges' :: [Int] -> [Age]
+toAges' = coerce
+:}
+
+toAges [1, 2, 3]
+toAges' [1, 2, 3]
+
+:t coerce
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+[Age 1,Age 2,Age 3]
+[Age 1,Age 2,Age 3]
+coerce :: Coercible a b => a -> b
+#+END_EXAMPLE
+
+Two types are ~Coercible~ if they have the same representation. We cannot define
+instances of ~Coercible~ they are deduced by GHC when we use ~newtype~.
+
+It automatically lift ~Coercible Age Int~ to ~Coercible [Age] [Int]~ and use
+symmetry to get ~Coercible Int Age~ and ~Coercible [Int] [Age]~.
+
+#+BEGIN_SRC haskell :eval never
+coerce :: forall (k :: RuntimeRep) (a :: TYPE k) (b :: TYPE k).
+  Coercible a b => a -> b
+
+type Type = TYPE LiftedRep
+#+END_SRC
+
+Where are the limits of ~Coerce~?
+
+#+BEGIN_SRC haskell
+:set -XTypeFamilies
+
+import Data.Coerce
+
+newtype Age = Age Int deriving (Show)
+
+:{
+data Student a = Student String a
+
+-- OK: Coerce (Int) (Age)
+-- OK: Coerce (Student Int) (Student Age)
+check :: Student Int -> Student Age
+check = coerce
+:}
+
+:{
+data Student1 a = Student1 String (Maybe a)
+
+-- OK: Coerce (Int) (Age)
+-- OK: Coerce (Maybe Int) (Maybe Age)
+-- OK: Coerce (Student1 Int) (Student1 Age)
+check1 :: Student1 Int -> Student1 Age
+check1 = coerce
+:}
+
+:{
+data Student2 m a = Student2 String (m a)
+
+-- KO: GHC doesn't trust the generic `m` on data declaration,
+-- doesn't matter if we specify `Maybe` on usage, Coercible is
+-- derived on data/newtype declaration.
+check2 :: Student2 Maybe Int -> Student2 Maybe Age
+check2 = coerce
+:}
+
+:{
+-- What about a type family that will not change the type?
+type family Id t
+type instance Id t = t
+
+data Student3 a = Student3 String (Id a)
+
+-- KO: GHC still prohibits coerce
+check3 :: Student3 Int -> Student3 Age
+check3 = coerce
+:}
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+
+<interactive>:536:10: error:
+    • Couldn't match type ‘Int’ with ‘Age’
+        arising from a use of ‘coerce’
+    • In the expression: coerce
+      In an equation for ‘check2’: check2 = coerce
+
+<interactive>:547:10: error:
+    • Couldn't match type ‘Int’ with ‘Age’
+        arising from a use of ‘coerce’
+    • In the expression: coerce
+      In an equation for ‘check3’: check3 = coerce
+#+END_EXAMPLE
+
+What are the rules? Depends on the *role system* aka on the /role/ of the ~a~
+type parameter in the definition of ~Student~. The roles are:
+
+- *phantom* when the type variable is a phantom type (doesn't exist on the right
+  side of the declaration) aka it doesn't exist/count at run-time, so they don't
+  interfere with ~coerce~ at all.
+- *representational* when the type variables are used to describe the run-time
+  representation. We can ~coerce~ between types in positions with
+  representational roles.
+- *nominal* doesn't give us information on the representation, they stand for
+  their name, nothing else, that's why they are called nominal. We are not
+  allowed to ~coerce~ between types in positions with nominal roles. Variables
+  in type families and type classes are always considered with nominal roles.
+
+If you know that you are correct and the particular case only depends on the GHC
+role system limitations then you can use ~unsafeCoerce~
+
+~Coercible~ is the mechanism through which *newtype* strategy derives instances,
+you can type classes functions using ~coerce~ in the right way
+
+#+BEGIN_SRC haskell
+:set -XInstanceSigs
+:set -XScopedTypeVariables
+
+import Control.Monad.Trans.State (StateT)
+
+:{
+newtype Age = Age Int deriving (Show)
+
+instance Eq Age where
+  (==) = coerce ((==) :: Int -> Int -> Bool)
+
+instance Ord Age where
+  compare = coerce (compare :: Int -> Int -> Ordering)
+:}
+
+:{
+newtype MyApp a = MayApp {
+  runApp :: StateT Int IO a
+}
+
+instance Functor MyApp where
+  fmap :: forall a b. (a -> b) -> MyApp a -> MyApp b
+  fmap = coerce (fmap :: (a -> b) -> StateT Int IO a -> StateT Int IO b)
+:}
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+#+END_EXAMPLE
+
+** 12.1.3 Deriving by an example with ~DerivingVia~
+The last strategy is the ~via~ strategy: we give GHC an example of a type that
+already implements the instance we need and say "Generate an implementation in
+the same way but replace types with ours".
+
+#+BEGIN_SRC haskell
+:set -XDerivingStrategies
+:set -XGeneralizedNewtypeDeriving
+:set -XDerivingVia
+
+:{
+newtype Age = Age Int
+  deriving newtype (Eq, Ord)
+:}
+
+:{
+newtype Age' = Age' Int
+  deriving (Eq, Ord) via Int
+:}
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+#+END_EXAMPLE
+
+They both derive the same instances in the same way, then why *newtype* strategy
+is not enough? Because often we use ~newtype~ exactly because we want to use
+alternative implementation of a type class than the one implemented for the
+original type.
+
+#+BEGIN_SRC haskell
+:set -XDerivingStrategies
+:set -XStandaloneDeriving
+:set -XDerivingVia
+
+import Data.Monoid (Alt)
+
+-- ??? Why
+
+:{
+newtype Age = Age (Maybe Int)
+  deriving (Semigroup, Monoid) via (Alt Maybe Int)
+
+-- deriving via (Alt Maybe Int) instance Semigroup Age
+-- deriving via (Alt Maybe Int) instance Monoid Age
+:}
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+
+<interactive>:694:13: error:
+    • Couldn't match representation of type: Maybe Int
+                               with that of: Alt Maybe Int
+        arising from the coercion of the method ‘<>’
+          from type ‘Alt Maybe Int -> Alt Maybe Int -> Alt Maybe Int’
+            to type ‘Age -> Age -> Age’
+      The data constructor ‘base-4.16.4.0:Data.Semigroup.Internal.Alt’
+        of newtype ‘Alt’ is not in scope
+    • When deriving the instance for (Semigroup Age)
+
+<interactive>:694:13: error:
+    • Couldn't match representation of type: Maybe Int
+                               with that of: Alt Maybe Int
+        arising from the coercion of the method ‘GHC.Base.stimes’
+          from type ‘forall b.
+                     Integral b =>
+                     b -> Alt Maybe Int -> Alt Maybe Int’
+            to type ‘forall b. Integral b => b -> Age -> Age’
+      The data constructor ‘base-4.16.4.0:Data.Semigroup.Internal.Alt’
+        of newtype ‘Alt’ is not in scope
+    • When deriving the instance for (Semigroup Age)
+
+<interactive>:694:24: error:
+    • Couldn't match representation of type: Maybe Int
+                               with that of: Alt Maybe Int
+        arising from the coercion of the method ‘mempty’
+          from type ‘Alt Maybe Int’ to type ‘Age’
+      The data constructor ‘base-4.16.4.0:Data.Semigroup.Internal.Alt’
+        of newtype ‘Alt’ is not in scope
+    • When deriving the instance for (Monoid Age)
+#+END_EXAMPLE
+
+* 12.2 Data-type generic programming
+It would be helpful to code generically, meaning that we want to deal only with
+a single representation for all similar data types.
+
+This magical "generic representation" is built around a concept of /sum/ and
+/product/ types.
+
+Data type generic programming is supported in Haskell by the ~GHC.Generic~
+module.
+
+** Generic data-type representation
+The type class ~Generic~ its able to get all the detailed information about a
+datatype.
+
+#+BEGIN_SRC haskell
+:set -XDeriveGeneric
+:set -XTypeApplications
+
+import GHC.Generics
+
+data Status = Ok | Err deriving (Show, Generic)
+
+:t from Ok
+from Ok
+from Err
+
+to @Status $ from Err
+
+data Request = Request String Int deriving (Show, Generic)
+
+:k! Rep Request
+from (Request "request" 0)
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+from Ok
+  :: D1
+       ('MetaData "Status" "Ghci147" "interactive" 'False)
+       (C1 ('MetaCons "Ok" 'PrefixI 'False) U1
+        :+: C1 ('MetaCons "Err" 'PrefixI 'False) U1)
+       x
+M1 {unM1 = L1 (M1 {unM1 = U1})}
+M1 {unM1 = R1 (M1 {unM1 = U1})}
+Err
+Rep Request :: * -> *
+= M1
+    D
+    ('MetaData "Request" "Ghci151" "interactive" 'False)
+    (M1
+       C
+       ('MetaCons "Request" 'PrefixI 'False)
+       (M1
+          S
+          ('MetaSel
+             'Nothing 'NoSourceUnpackedness 'NoSourceStrictness 'DecidedLazy)
+          (K1 R [Char])
+        :*: M1
+              S
+              ('MetaSel
+                 'Nothing 'NoSourceUnpackedness 'NoSourceStrictness 'DecidedLazy)
+              (K1 R Int)))
+M1 {unM1 = M1 {unM1 = M1 {unM1 = K1 {unK1 = "request"}} :*: M1 {unM1 = K1 {unK1 = 0}}}}
+#+END_EXAMPLE
+
+- ~D1~ stands for /a datatype/
+- We have some metadata (~'Metadata~) about the type, like the name (~"Status"~)
+  and that is not a ~newtype~ (~'False~)
+- Next we have two data constructors (~C1~) combined with ~:+:~ with their metadata
+- Also those data constructors do not have arguments (~U1~)
+
+To do this it exploits several type-level features including data kinds (see the
+ticked names) and type level strings (we can use ~KnownSymbol~ to bring names to
+a value level)
+
+- ~M1~ constructs a value.
+- ~L1~ corresponds to the left data constructor.
+- ~R1~ corresponds to the right data constructor.
+- ~U1~ corresponds to the absence of arguments to it.
+
+- Product types are combined with ~:*:~ operator
+
+** Example: Generating SQL queries
+Let's do something useful with a generic representation. Generate ~INSERT~
+SQL queries for our data type.
+
+#+BEGIN_SRC haskell
+:set -XOverloadedStrings
+:set -XDerivingStrategies
+:set -XStandaloneDeriving
+:set -XDeriveGeneric
+:set -XDeriveAnyClass
+:set -XDefaultSignatures
+
+import GHC.Generics
+import TextShow
+import Data.Text (Text)
+import Data.Text.Internal.Builder
+import qualified Data.Text.IO as TIO
+
+-- Take the Student type and generate an INSERT statement like
+-- INSERT INTO students (studentId, name, year) VALUES (18265, "John Doe", 2)
+:{
+data Student = Student {studentID :: String, name :: Text, year :: Int}
+  deriving stock (Generic, Show)
+:}
+
+:{
+data Course = Course {courseID :: String, title :: Text, instructor :: Text}
+  deriving stock (Generic, Show)
+:}
+
+-- The stock strategy will let us derive the Generic instance.
+-- The Generic instance will let us derive an instance by a default implementation.
+-- The default implementation will be based on the Generic instance.
+
+-- From the Generic instance we can get the list of field names and the list of field values.
+:{
+class ToColumnsAndValuesLists f where
+  toColumnsValues :: f a -> ([Builder], [Builder])
+
+-- A data type U1 has no fields, so the list is empty
+instance ToColumnsAndValuesLists U1 where
+  toColumnsValues _ = ([], [])
+
+-- If we have several fields the the data types are combined with :*:
+instance (ToColumnsAndValuesLists a, ToColumnsAndValuesLists b) =>
+         ToColumnsAndValuesLists (a :*: b) where
+  toColumnsValues (a :*: b) = (columns1 <> columns2, values1 <> values2)
+    where (columns1, values1) = toColumnsValues a
+          (columns2, values2) = toColumnsValues b
+
+-- Now M1, ignore most part to traverse over
+instance (ToColumnsAndValuesLists a) => ToColumnsAndValuesLists (M1 i c a) where
+  toColumnsValues (M1 a) = toColumnsValues a
+
+-- Overlapping instance ??? for the particular case to catch the field names
+instance {-# OVERLAPPING #-} (ToColumnsAndValuesLists a, Selector c) => ToColumnsAndValuesLists (M1 S c a) where
+  toColumnsValues s@(M1 a) = (fromString (selName s) : columns, values)
+    where (columns, values) = toColumnsValues a
+
+instance TextShow a => ToColumnsAndValuesLists (K1 i a) where
+  toColumnsValues (K1 a) = ([], [showb a])
+:}
+
+toColumnsValues (from $ Student "1822" "Gabriele Lana" 2)
+
+-- Now we can use this information to build an INSERT statement
+
+:{
+buildersToList :: [Builder] -> Builder
+buildersToList [] = "()"
+buildersToList (x:xs) = singleton '(' <> x <> go xs -- "(..
+  where
+    go (y:ys) = showbCommaSpace <> y <> go ys       -- .., ..
+    go []     = singleton ')'                        -- ..)"
+:}
+
+:{
+insertIntoDefault :: (Generic a, ToColumnsAndValuesLists (Rep a)) => Text -> a -> Text
+insertIntoDefault table value =
+  toText $ "INSERT INTO " <> fromText table <> " "
+         <> buildersToList columns
+         <> " VALUES " <> buildersToList values
+  where (columns, values) = toColumnsValues (from value)
+:}
+
+:{
+class ToSQL a where
+  insertInto :: Text -> a -> Text
+
+  default insertInto :: (Generic a, ToColumnsAndValuesLists (Rep a)) => Text -> a -> Text
+  insertInto = insertIntoDefault
+:}
+
+deriving anyclass instance ToSQL Student
+deriving anyclass instance ToSQL Course
+
+insertInto "Student" $ Student "1822" "Gabriele Lana" 2
+insertInto "Course" $ Course "CS101" "Computer Science 101" "Gabriele Lana"
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+(["studentID","name","year"],["\"1822\"","\"Gabriele Lana\"","2"])
+INSERT INTO Student (studentID, name, year) VALUES (\"1822\", \"Gabriele Lana\", 2)
+INSERT INTO Course (courseID, title, instructor) VALUES (\"CS101\", \"Computer Science 101\", \"Gabriele Lana\")
+#+END_EXAMPLE
+
+* 12.3 Template Haskell and quasi-quotes
+TODO
+
+** 12.3.1 A tutorial on Template Haskell
+TODO
+
+** 12.3.2 Example: Generating remote function calls
+TODO
+
+* Summary
+TODO
+
+* References
+- [[https://www.youtube.com/watch?v=iLZdN-R1JGk][Zero cost coercion in Haskell]] (video)
+- [[https://www.youtube.com/watch?v=Zww6pKxxaOg][DerivingVia: how to turn hand written instances into an anti-pattern]] (video)
+
+* Exercises
+TODO
