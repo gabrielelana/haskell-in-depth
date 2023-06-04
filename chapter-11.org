@@ -118,18 +118,16 @@ constructor `Temp`? Is it because it's a `newtype`?
 <<temperature>>
 :t 65
 :t 65 :: Temp C
-:t 65 :: Temp F
+:t Temp 65 :: Temp C
 :t Temp 65
-:k Temp
 #+END_SRC
 
 #+RESULTS:
 #+BEGIN_EXAMPLE
 65 :: Num a => a
 65 :: Temp C :: Temp C
-65 :: Temp F :: Temp F
+Temp 65 :: Temp C :: Temp C
 Temp 65 :: forall {k} {u :: k}. Temp u
-Temp :: k -> Type
 #+END_EXAMPLE
 
 *** Proxy
@@ -638,6 +636,7 @@ X
 :set -XDataKinds
 :set -XNoStarIsType
 :set -XUndecidableInstances
+:set -XFlexibleContexts
 
 import Data.List (singleton)
 
@@ -665,8 +664,11 @@ instance Widener Int where
 instance Widener Char where
   widen = singleton
 
+instance Widener (Int,Int) where
+  widen x = show x
+
 -- ASK: why doesn't work?
--- instance Show a => Widener a where
+-- instance forall a. Show a => Widener a where
 --   widen x = show x
 :}
 
@@ -679,6 +681,7 @@ widen 'X'
 
 -- ASK: he is not reducing `Widen a` at the end, why?
 :kind! forall a. Show a => Widen a
+:kind! forall a. Widen a
 #+END_SRC
 
 #+RESULTS:
@@ -691,6 +694,8 @@ Widen Double :: Type
 = [Char]
 forall a. Show a => Widen a :: Type
 = Show a => Widen a
+forall a. Widen a :: Type
+= Widen a
 #+END_EXAMPLE
 
 ** Data Families
@@ -859,6 +864,13 @@ inspect (N _) = "Number"
 inspect (B _) = "Bool"
 :}
 
+-- :{
+-- inspect' :: Dyn -> String | Integer | Bool
+-- inspect' (S s) = s
+-- inspect' (N n) = n
+-- inspect' (B b) = b
+-- :}
+
 :{
 pp :: Dyn -> String
 pp (S s) = s
@@ -872,6 +884,8 @@ pp <$> [S "Hello", N 42, S "World", B True]
 
 #+RESULTS:
 #+BEGIN_EXAMPLE
+
+<interactive>:1875:37: error: parse error on input ‘|’
 ["String","Number","String","Bool"]
 ["Hello","42","World","True"]
 #+END_EXAMPLE
@@ -1135,27 +1149,20 @@ process :: (forall a. Num a => a -> a) -> [Int] -> [Int]
 process f xs = map f xs
 :}
 
--- Good
-process inc [1, 2, 3]
-
 -- Bad: (`Int -> Int` is not `Num a => a -> a`)
-process succ [1, 2, 3]
+-- process succ [1, 2, 3]
+
+-- Good
+process inc [1, 2, 3] --
+
+42
+
 #+END_SRC
 
 #+RESULTS:
 #+BEGIN_EXAMPLE
 [2,3,4]
-<interactive>:96:9: error:
-    • Couldn't match type ‘a’ with ‘Int’
-      Expected: a -> a
-        Actual: Int -> Int
-      ‘a’ is a rigid type variable bound by
-        a type expected by the context:
-          forall a. Num a => a -> a
-        at <interactive>:96:9-12
-    • In the first argument of ‘process’, namely ‘succ’
-      In the expression: process succ [1, 2, 3]
-      In an equation for ‘it’: it = process succ [1, 2, 3]
+42
 #+END_EXAMPLE
 
 NOTE: The /rank/ is the count of polymorphic declarations in function arguments
