@@ -531,16 +531,251 @@ INSERT INTO Course (courseID, title, instructor) VALUES (\"CS101\", \"Computer S
 #+END_EXAMPLE
 
 * 12.3 Template Haskell and quasi-quotes
-TODO
+GHC compiler: parsing -> AST -> Template Haskell -> AST -> ...
+
+DISCUSS: quote "As a rule, it's better avoid using Template Haskell in
+production code."
 
 ** 12.3.1 A tutorial on Template Haskell
-TODO
+#+BEGIN_SRC haskell
+:set -XTemplateHaskell
+
+import Language.Haskell.TH
+
+-- From expression to AST
+q = runQ [| 1 + 2 |] -- `[|` and `|]` are called Oxford brackets
+:t q                 -- this is a `Q` or `Quasi` monad
+q                    -- in practice we have an AST of the expression between brackets
+
+-- Build AST directly
+answer = LitE (IntegerL 42)
+:t answer
+
+-- Can *splice* AST into code itself, NOTE: it can work also as "unquote"
+$(pure answer)
+$(q)
+$q
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+q                 -- this is a `Q` or `Quasi` monad
+  :: Language.Haskell.TH.Syntax.Quasi m => m Exp
+InfixE (Just (LitE (IntegerL 1))) (VarE GHC.Num.+) (Just (LitE (IntegerL 2)))
+answer :: Exp
+42
+3
+3
+#+END_EXAMPLE
+
+Generating expressions.
+
+#+BEGIN_SRC haskell
+:set -XTemplateHaskell
+
+-- how does a lambda looks like in AST?
+runQ [| \(x, _, _) -> x |]
+
+:{
+proj n k = do
+  x <- newName "x" -- creates a unique simbol for a variable
+  let makePattern j
+        | j == k    = VarP x
+        | otherwise = WildP
+  pure $ LamE [TupP $ map makePattern [0..n-1]] (VarE x)
+:}
+
+proj 3 2
+$(proj 3 2) ("a", "b", "c")
+
+proj 3 4 -- note the variable is not captured, only returned
+$(proj 3 4) ("a", "b", "c")
+
+-- check the input values
+:{
+proj' n k
+  | n > 1 && 0 <= k && k < n = proj n k -- we are ok, input is valid
+  | n <= 1                   = fail "Number of tuple arguments must be >= 1"
+  | k < 0                    = fail "Tuple selector must be >= 0"
+  | otherwise                = fail "Tuple selector out of range"
+:}
+
+proj' 3 4
+
+-- we can do the same thing also with "quote" and "splice" without
+-- the need to use AST data constructors
+
+-- NOTE: here we are going to use `varP` instead of `VarP` because the
+-- splice operator expects a `Q` monad
+:t VarP
+:t varP
+
+:{
+proj'' n k
+  | n > 1 && 0 <= k && k < n = do
+      x <- newName "x"
+      [| \ $(mkArg x) -> $(varE x) |] -- splice and quote
+  | n <= 1                   = fail "Number of tuple arguments must be >= 1"
+  | k < 0                    = fail "Tuple selector must be >= 0"
+  | otherwise                = fail "Tuple selector out of range"
+  where
+    mkPat x j
+      | j == k    = varP x
+      | otherwise = wildP
+    mkArg x = tupP $ map (mkPat x) [0..n-1]
+:}
+
+-- DISCUSS: not sure is better... probably worse
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+LamE [TupP [VarP x_42,WildP,WildP]] (VarE x_42)
+LamE [TupP [WildP,WildP,VarP x_43]] (VarE x_43)
+c
+LamE [TupP [WildP,WildP,WildP]] (VarE x_44)
+<interactive>:1986:2: error:
+    • The exact Name ‘x_ajOf’ is not in scope
+        Probable cause: you used a unique Template Haskell name (NameU),
+        perhaps via newName, but did not bind it
+        If that's it, then -ddump-splices might be useful
+    • In the untyped splice: $(proj 3 4)
+,*** Exception: user error (Tuple selector out of range)
+VarP :: Name -> Pat
+varP :: Quote m => Name -> m Pat
+<interactive>:1:2: error:
+    • Couldn't match type ‘()’ with ‘Q Exp’
+      Expected: ExpQ
+        Actual: ()
+    • In the expression: ()
+      In the untyped splice: $()
+#+END_EXAMPLE
+
+When you have constructed the code you probably want to consult the compiler
+about the code you produced. This process is called /reification/.
+
+Reification means turning something abstract into something concrete.
+
+In Template Haskell we /reify/ names into full information about the entities
+behind those names. NOTE: An AST is pure syntax. As a result we can inspect this
+information and use it to generate code.
+
+#+BEGIN_SRC haskell
+:set -XTemplateHaskell
+
+import Language.Haskell.TH
+
+-- Suppose we have the following data type
+
+:{
+data Shape = Circle Double
+           | Square Double
+           | Triangle Double Double Double
+:}
+
+-- And we need the following predicates
+-- isCircle :: Shape -> Bool
+-- isSquare :: Shape -> Bool
+-- isTriangle :: Shape -> Bool
+
+-- They are easy but tedious to write, lets generate them ;-)
+-- 1. Reify the given data-type name
+-- 2. Write code to generate trivial predicate definitions
+-- 3. Use splice to generate code for predicates
+
+:{
+extractConstructors :: Info -> [Con]
+extractConstructors (TyConI (DataD _ _ _ _ cons _)) = cons
+extractConstructors _ = []
+
+mkPredicate :: Con -> Q [Dec]
+mkPredicate (NormalC name types) =
+  [d|
+   $predicate = \z -> case z of
+                        $pat -> True
+                        _    -> False
+    |]
+  where
+    predicate = varP $ mkName $ "is" ++ nameBase name
+    -- wild pattern for each data constructor parameter
+    pat = conP name $ replicate (length types) wildP
+mkPredicate _ = pure []
+
+mkPredicates :: Name -> Q [Dec]
+mkPredicates name =
+  reify name >>= fmap concat . mapM mkPredicate . extractConstructors
+:}
+
+:t reify
+:t lookupValueName
+-- reify ''Shape
+-- fmap pprint $ runQ (reify ''Shape)
+
+-- unfortunately cannot run here
+$(mkPredicates ''Shape)
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+reify :: Name -> Q Info
+lookupValueName :: String -> Q (Maybe Name)
+Template Haskell error: Can't do `reify' in the IO monad
+,*** Exception: user error (Template Haskell failure)
+#+END_EXAMPLE
+
+We also have the ability to create "quasi-quoter", aka interpreter of chunk of
+text in a source file.
+
+Let's implement a simple raw multi-line quasi-quoter
+
+#+BEGIN_SRC haskell
+:set -XTemplateHaskell
+
+import Language.Haskell.TH
+import Language.Haskell.TH.Quote
+
+:{
+str = QuasiQuoter { quoteExp = stringE -- in the context of an expression will create a string
+                  , quotePat = undefined -- we don't care about other context
+                  , quoteType = undefined
+                  , quoteDec = undefined
+                  }
+:}
+
+:{
+x = [str|What needs my Shakespeare for his honoured bones,
+The labor of an age in pilèd stones,
+Or that his hallowed relics should be hid
+Under a star-ypointing pyramid?
+Dear son of Memory, great heir of fame,
+What need’st thou such weak witness of thy name?
+Thou in our wonder and astonishment
+Hast built thyself a live-long monument|]
+
+putStrLn x
+:}
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+<interactive>:4226:1: error:
+    parse error (possibly incorrect indentation or mismatched brackets)
+#+END_EXAMPLE
 
 ** 12.3.2 Example: Generating remote function calls
 TODO
 
 * Summary
-TODO
+- ~GHC~ provides sophisticated instance-deriving mechanisms.
+- Specifying strategies for deriving clauses explicitly is generally considered
+  good practices.
+- ~GHC.Generics~ allows us to write code with respect to data-type
+  representation and not the data type itself.
+- We use data-type-generic programming with ~GHC.Generics~ to provide type
+  classes suitable to work with default implementations.
+- We use Template Haskell to generate any code we need that is too dull to write
+  manually.
+- Template Haskell is powerful but hard and error prone.
 
 * References
 - [[https://www.youtube.com/watch?v=iLZdN-R1JGk][Zero cost coercion in Haskell]] (video)
