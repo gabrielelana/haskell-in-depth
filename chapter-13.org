@@ -1,0 +1,873 @@
+#+TITLE: More About Types
+
+#+PROPERTY: header-args:haskell :results replace output
+#+PROPERTY: header-args:haskell+ :noweb yes
+#+PROPERTY: header-args:haskell+ :wrap EXAMPLE
+
+- We will implement a RESTful web service using type families and type classes.
+- We will implement a safe type-controlled interface for elevators using
+  primarily GADTs.
+- Along the way we will implement /singletons/, special values that can be
+  operated both on term level and type level.
+
+* 13.1 Types for specifying a web API
+We will start with the most basic implementation to one similar to ~Servant~
+
+The web service will expose two routes:
+1. ~GET /title/1234~ will reply with the book's title
+2. ~GET /year/1234~ will reply with the book's year of publication
+3. ~GET /rating/1234~ will reply with the book's rating
+
+We will assume for simplicity that the URL's path will be already split into its
+components and to not have to deal with the HTTP protocol
+
+** 13.1.1 Stage 0: Programming with Strings
+#+BEGIN_SRC haskell
+
+-- ioError :: IOError -> IO a
+-- userError :: String -> IOError
+
+:{
+get :: [String] -> IO String
+get [] = pure "OK"
+get [op, _] =
+  case op of
+    "title" -> pure "Haskell in Depth"
+    "year" -> pure "2021"
+    "rating" -> pure "Great!"
+    _ -> ioError (userError $ "Unsuported operation: " <> op)
+get _ = ioError (userError "Unsupported request")
+:}
+
+:{
+check :: IO ()
+check = do
+  b <- get []
+  y <- get ["year", "1755"]
+  putStrLn (if b == "OK" && y == "2021" then "OK" else "Wrong answer!")
+:}
+
+check
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+OK
+#+END_EXAMPLE
+
+** 13.1.2 Stage 1: Introducing Types
+What can we do?
+1. Book ratings and service status could be represented by a type enumerating
+   possible values.
+2. One particular request handler deserves its own type.
+3. Request handlers could return specific types instead of plain ~String~.
+4. We could combine request handlers into one data structure, thus getting a
+   service as a value and the ability to write different implementations.
+5. We could also introduce routing as a separate stage with its own type.
+
+#+BEGIN_SRC haskell
+import Text.Read (readMaybe)
+
+-- Goal 1
+data Rating = Bad | Good | Great deriving Show
+
+data ServiceStatus = Ok | Down deriving Show
+
+-- Goal 2
+type BookID = Int
+type HandlerAction a = IO a
+
+-- Goal 3
+type RequestHandler a = BookID -> HandlerAction a
+
+-- Goal 4
+
+-- We can separate service implementation from request processing.
+
+-- Once we have a notion of handler we can refine its type further
+-- and get more control over handlers.
+
+-- For now we are able to control its return type: it's impossible
+-- to reurn something different than a ~Rating~ from ~rating~ request.
+:{
+data BookAPI = BookAPI
+               { root :: HandlerAction ServiceStatus
+               , title :: RequestHandler String
+               , year :: RequestHandler Int
+               , rating :: RequestHandler Rating
+               }
+
+s1 = BookAPI
+  { root = pure Ok
+  , title = const $ pure "Haskell in Depth"
+  , year = const $ pure 2021
+  , rating = const $ pure Great
+  }
+
+s2 = BookAPI
+  { root = pure Down
+  , title = const $ notImplemented
+  , year = const $ notImplemented
+  , rating = const $ notImplemented
+  }
+  where notImplemented = ioError (userError "Not implemented")
+:}
+
+type Request = [String]
+
+-- Goal 5
+
+:{
+encode :: Show a => HandlerAction a -> IO String
+encode handler = show <$> handler
+
+route :: BookAPI -> Request -> Maybe (IO String)
+route api [] = pure $ encode $ root api
+route api [op, id] = do
+  bookID <- readMaybe id
+  case op of
+    "title" -> pure $ title api bookID
+    "year" -> pure $ encode $ year api bookID
+    "rating" -> pure $ encode $ rating api bookID
+    _ -> Nothing
+route _ _ = Nothing
+
+get :: BookAPI -> Request -> IO String
+get api req =
+  case route api req of
+    (Just x) -> x
+    Nothing -> pure "Malformed request"
+:}
+
+:{
+check api = do
+  b <- get api []
+  answer <- get api ["year", "111"]
+  putStrLn (if b == "Ok" && answer == "2021" then "OK" else "WRONG!")
+:}
+
+check s1
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+OK
+#+END_EXAMPLE
+
+** 13.1.3 Stage 2: Specifying a web interface with types
+Put all the necessary information about the API directly into a type.
+
+We already know that we can use string literals in the types, so we will use
+them.
+
+NOTE: Once we have an interface described by a type, we need to write functions for
+every operation, types of those functions should /relate/ to a description in
+the interface, we can use type families to compute those function's types in the
+service implementation.
+
+TODO: rewrite the statement before when it's more clear
+
+#+BEGIN_SRC haskell
+:set -XKindSignatures -XTypeOperators -XPolyKinds -XDataKinds -XTypeFamilies
+
+import Data.Kind
+import GHC.TypeLits
+import Text.Read (readMaybe)
+
+:{
+-- Small type-level language for describing web interfaces
+
+-- Describe what we are going to get
+data Get (a :: Type)
+
+-- Captures a request parameter of some type
+data Capture (a :: Type)
+
+-- Alternative request operations (TypeOperators)
+data a :<|> b = a :<|> b
+infixr 8 :<|>
+
+-- Adds a request component
+data (a :: k) :> (b :: Type)
+infixr 9 :>
+
+-- NOTE: (:>) has higher precedence than (:<|>) so that we can have
+-- alternative requests made with request components.
+
+-- NOTE: the polymorphic kind (::k) in (:>) will allow us to have
+-- whatever we like in the description of a request (ex. Symbol).
+
+-- NOTE: (:<|>) is the only non empty type, we will use it to
+-- build a list of implementations, all others serve as types
+-- exclusively.
+:}
+
+data Rating = Bad | Good | Great deriving Show
+data ServiceStatus = Ok | Down deriving Show
+type BookID = Int
+type HandlerAction a = IO a
+type RequestHandler a = BookID -> HandlerAction a
+
+:{
+type BookAPI = Get ServiceStatus
+               :<|> "title" :> Capture BookID :> Get String
+               :<|> "year" :> Capture BookID :> Get Int
+               :<|> "rating" :> Capture BookID :> Get Rating
+:}
+
+-- We need to translate this type-level description to the
+-- implementation's type. We will deduce the last with the
+-- first using type families.
+
+:{
+-- `layout` is our type-level service description
+-- `Server layout` is our implementation's type
+type family Server layout :: Type
+-- `Get a` translates to an `HandlerAction a`
+type instance Server (Get a) = HandlerAction a
+-- A pair of request becomes a pair of request implementation
+type instance Server (a :<|> b) = Server a :<|> Server b
+-- Symbols are ignored
+type instance Server ((s :: Symbol) :> r) = Server r
+-- Captures become parameters
+type instance Server (Capture a :> r) = a -> Server r
+:}
+
+:k! (Server BookAPI)
+
+:{
+s1 :: Server BookAPI
+s1 = pure Ok
+  :<|> (const $ pure "Haskell in Depth")
+  :<|> (const $ pure 2021)
+  :<|> (const $ pure Great)
+:}
+
+-- NOTE: from the book: "... if we replace `Server BookAPI` with `BookAPI` as
+-- defined in the previous example, we'll see no difference. These types are
+-- the same according to GHC". it's not true :-/
+
+:{
+encode :: Show a => HandlerAction a -> IO String
+encode handler = show <$> handler
+
+route :: Server BookAPI -> Request -> Maybe (IO String)
+route (root :<|> _) [] = pure $ encode $ root
+route (_ :<|> title :<|> year :<|> rating) [op, id] = do
+  bookID <- readMaybe id
+  case op of
+    "title" -> pure $ title bookID
+    "year" -> pure $ encode $ year bookID
+    "rating" -> pure $ encode $ rating bookID
+    _ -> Nothing
+route _ _ = Nothing
+
+get :: Server BookAPI -> Request -> IO String
+get api req =
+  case route api req of
+    (Just x) -> x
+    Nothing -> pure "Malformed request"
+:}
+
+:{
+check api = do
+  b <- get api []
+  answer <- get api ["year", "111"]
+  putStrLn (if b == "Ok" && answer == "2021" then "OK" else "WRONG!")
+:}
+
+check s1
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+
+<interactive>:1:1: error: Not in scope: type variable ‘layout’
+(Server BookAPI) :: *
+= IO ServiceStatus
+  :<|> ((Int -> IO [Char])
+        :<|> ((Int -> IO Int) :<|> (Int -> IO Rating)))
+OK
+#+END_EXAMPLE
+
+** 13.1.4 Stage 3: Implement routing with type class
+Routing can itself be constructed automatically from an interface
+
+#+BEGIN_SRC haskell
+:set -XKindSignatures -XTypeOperators -XPolyKinds -XDataKinds -XTypeFamilies
+:set -XFlexibleInstances -XInstanceSigs -XScopedTypeVariables
+
+import Data.Kind
+import GHC.TypeLits
+import Data.Proxy
+import Text.Read (readMaybe)
+import Control.Applicative ((<|>))
+
+:{
+data Get (a :: Type)
+
+data Capture (a :: Type)
+
+data a :<|> b = a :<|> b
+infixr 8 :<|>
+
+data (a :: k) :> (b :: Type)
+infixr 9 :>
+:}
+
+data Rating = Bad | Good | Great deriving Show
+data ServiceStatus = Ok | Down deriving Show
+type Request = [String]
+type BookID = Int
+type HandlerAction a = IO a
+type RequestHandler a = BookID -> HandlerAction a
+
+:{
+type BookAPI = Get ServiceStatus
+               :<|> "title" :> Capture BookID :> Get String
+               :<|> "year" :> Capture BookID :> Get Int
+               :<|> "rating" :> Capture BookID :> Get Rating
+:}
+
+:{
+-- `layout` is our type-level service description
+-- `Server layout` is our implementation's type
+type family Server layout :: Type
+type instance Server (Get a) = HandlerAction a
+type instance Server (a :<|> b) = Server a :<|> Server b
+type instance Server ((s :: Symbol) :> r) = Server r
+type instance Server (Capture a :> r) = a -> Server r
+:}
+
+:{
+s1 :: Server BookAPI
+s1 = pure Ok
+  :<|> (const $ pure "Haskell in Depth")
+  :<|> (const $ pure 2021)
+  :<|> (const $ pure Great)
+:}
+
+:{
+class HasServer layout where
+  route :: Proxy layout ->
+           Server layout ->
+           Request ->
+           Maybe (IO String)
+
+-- We will use `Proxy layout` to implement instances
+
+instance Show a => HasServer (Get a) where
+  -- InstanceSigs let's us specify the signature
+  route :: Proxy (Get a) -> HandlerAction a -> Request -> Maybe (IO String)
+  route _ handler [] = Just (encode $ handler)
+  route _ _ _ = Nothing
+
+instance (HasServer a, HasServer b) => HasServer (a :<|> b) where
+  route :: Proxy (a :<|> b) -> (Server a :<|> Server b) -> Request -> Maybe (IO String)
+  route _ (hl :<|> hr) r = route (Proxy :: Proxy a) hl r
+                       <|> route (Proxy :: Proxy b) hr r
+
+instance (KnownSymbol s, HasServer r) => HasServer ((s :: Symbol) :> r) where
+  route :: Proxy (s :> r) -> Server r -> Request -> Maybe (IO String)
+  route _ handler (x : xs)
+    -- if the symbol is equal to the route component
+    | symbolVal (Proxy :: Proxy s) == x = route (Proxy :: Proxy r) handler xs
+  route _ _ _ = Nothing
+
+instance (Read a, HasServer r) => HasServer (Capture a :> r) where
+  route :: Proxy (Capture a :> r) -> (a -> Server r) -> Request -> Maybe (IO String)
+  route _ handler (x : xs) = do
+    a <- readMaybe x
+    route (Proxy :: Proxy r) (handler a) xs
+  route _ _ _ = Nothing
+:}
+
+:{
+get :: HasServer layout => Proxy layout -> Server layout -> Request -> IO String
+get proxy handler request =
+  case route proxy handler request of
+    Just x -> x
+    Nothing -> pure "Unhandled request"
+:}
+
+:{
+check api = do
+  b <- get (Proxy :: Proxy BookAPI) api []
+  answer <- get (Proxy :: Proxy BookAPI) api ["year", "111"]
+  putStrLn (if b == "Ok" && answer == "2021" then "OK" else "WRONG!")
+:}
+
+check s1
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+OK
+#+END_EXAMPLE
+
+** 1.3.5: Implementing a web service with servant
+
+#+BEGIN_SRC haskell :eval never
+-- 1. Describe the API
+data Rating = Bad | Good | Great deriving (Show, Generic, ToJSON)
+
+data ServiceStatus = Ok | Down deriving (Show, Generic, ToJSON)
+
+type BookID = Int
+
+-- '[JSON] is a type-level list of available encodings that can be used by servant
+type BookAPI = Get '[JSON] ServiceStatus
+             :<|> "title" :> Capture "id" BookID :> Get '[HTML] H.Html
+             :<|> "year" :> Capture "id" BookID :> Get '[JSON] Int
+             :<|> "rating" :> Capture "id" BookID :> Get '[JSON] Rating
+
+-- 2. Provide implementation for particular requests
+s1 :: Server BookAPI
+s1 = pure Ok
+  :<|> (const $ H.toHtml $ H.b "Haskell in Depth")
+  :<|> (const $ pure 2021)
+  :<|> (const $ pure Great)
+
+-- 3. Derive server functionality and run it
+
+-- thanks to packages servant-server and warp this is easy
+app :: Application
+app = serve (Proxy :: BookAPI) s1
+
+main :: IO ()
+main = run 8081 app
+#+END_SRC
+
+* 13.2 Safe interface for elevators
+Some definition
+- Progress :: a well-typed program is either a value or can be evaluated
+  further.
+- Preservation :: evaluation steps preserve types, an initial program and
+  resulting value have the same type.
+- Safety :: when you have /Progress/ and /Preservation/.
+
+We use types to check everything that can be checked at compile time.
+
+We write tests to check over program properties.
+
+We have to write run-time checks to report to user exceptions and unhandled
+conditions.
+
+Sometimes the cost of a possible error is too high, then we have to think hard,
+deal with sophisticated types, and write proofs.
+
+** 13.2.1 Unsafe interface for elevators
+#+BEGIN_SRC haskell
+
+import Control.Monad
+import Control.Monad.IO.Class
+
+:{
+-- Low level usafe elevator drivers
+upLL :: IO ()
+upLL = putStrLn "Going up"
+
+downLL :: IO ()
+downLL = putStrLn "Going down"
+
+openLL :: IO ()
+openLL = putStrLn "Door is opening"
+
+closeLL :: IO ()
+closeLL = putStrLn "Door is closing"
+:}
+
+:{
+-- Types to represent an elevator
+data DoorState = Opened | Closed deriving (Eq, Show)
+
+newtype Floor = Floor Int deriving (Eq, Ord, Show)
+
+instance Bounded Floor where
+  minBound = Floor 0
+  maxBound = Floor 5
+
+data Elevator = Elevator {
+  current :: Floor,
+  door :: DoorState
+} deriving Show
+:}
+
+:{
+-- Trivial run-time checks
+sameFloor :: Floor -> Elevator -> Bool
+sameFloor f e = current e == f
+
+isClosed :: Elevator -> Bool
+isClosed e = door e == Closed
+
+isOpened :: Elevator -> Bool
+isOpened = (== Opened) . door
+
+belowTop :: Elevator -> Bool
+belowTop e = current e < maxBound
+
+aboveGround :: Elevator -> Bool
+aboveGround e = current e > minBound
+:}
+
+-- NOTE: we will use MonadIO and not IO so that in the future we can switch
+-- to a more complex monad stack based on IO
+
+:{
+-- Standard operations with run-time checks
+down :: MonadIO m => Elevator -> m Elevator
+down e@(Elevator f@(Floor n) Closed)
+  | aboveGround e = do
+      liftIO downLL
+      pure $ e {current = Floor (n - 1)}
+  | otherwise = error "Elevator on the ground floor cannot go down"
+down (Elevator _ Opened) = error "Elevator with open door cannot go anywhere"
+
+up :: MonadIO m => Elevator -> m Elevator
+up e@(Elevator f@(Floor n) Closed)
+  | belowTop e = do
+      liftIO upLL
+      pure $ e {current = Floor (n + 1)}
+  | otherwise = error "Elevator on the top floor cannot go up"
+up (Elevator _ Opened) = error "Elevator with open door cannot go anywhere"
+
+open :: MonadIO m => Floor -> Elevator -> m Elevator
+open f e
+  | sameFloor f e =
+      if isClosed e
+      then do
+        liftIO openLL
+        pure $ e {door = Opened}
+      else error "Door is already opened"
+  | otherwise = error "Cannot operate the door of an elevator or another floor"
+
+close :: MonadIO m => Floor -> Elevator -> m Elevator
+close f e
+  | sameFloor f e =
+      if isOpened e
+      then do
+        liftIO closeLL
+        pure $ e {door = Closed}
+      else error "Door is already closed"
+  | otherwise = error "Cannot operate the door of an elevator or another floor"
+:}
+
+:{
+-- High level function but with still more run-time checks
+moveTo :: MonadIO m => Floor -> Elevator -> m Elevator
+moveTo f e' = do
+  e <- ensureClosed e'
+  case compare f (current e) of
+    EQ -> pure e
+    GT -> up e >>= moveTo f
+    LT -> down e >>= moveTo f
+  where ensureClosed e@(Elevator f Opened) = close f e
+        ensureClosed e                     = pure e
+
+call :: MonadIO m => Floor -> Elevator -> m Elevator
+call f e = do
+  liftIO $ putStrLn $ "Call elevator to: " <> show f
+  if sameFloor f e
+    then if isOpened e
+         then pure e
+         else open f e
+    else moveTo f e >>= open f
+:}
+
+-- Example
+
+elevatorAtGroundFloor = Elevator (Floor 0) Closed
+
+:{
+example :: IO [String] -> IO ()
+example args = do
+  floors <- map (Floor . read) <$> args
+  foldM_ traceTo elevatorAtGroundFloor floors
+  where traceTo e f = call f e >>= \e -> print e >> pure e
+:}
+
+example $ pure ["3", "1", "0", "0"]
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+Call elevator to: Floor 3
+Going up
+Going up
+Going up
+Door is opening
+Elevator {current = Floor 3, door = Opened}
+Call elevator to: Floor 1
+Door is closing
+Going down
+Going down
+Door is opening
+Elevator {current = Floor 1, door = Opened}
+Call elevator to: Floor 0
+Door is closing
+Going down
+Door is opening
+Elevator {current = Floor 0, door = Opened}
+Call elevator to: Floor 0
+Elevator {current = Floor 0, door = Opened}
+#+END_EXAMPLE
+
+** 13.2.2 Type-safe doors with singletons
+What's the problem with the previous version? The floors and the state of the
+door where values, the type system knew very little of them, we have to bring
+them to type level.
+
+Then we could express the following things:
+- This function can be called only if the door is closed.
+- We can go down because we are not on the ground floor.
+- We can go up because we are not at the top floor.
+
+The idea is simple, we introduce a whole bunch of types with only one value.
+Such types are called /Singleton Types/ or simply /Singletons/.
+
+We already know that part of the job is done by ~DataKinds~ GHC extension:
+- Promotes /Data Constructors/ to /Type Constructors/
+- Promotes /Type Constructors/ to /Kind Constructors/
+
+Further we can use singletons to control state machine behaviour.
+
+#+BEGIN_SRC haskell
+:set -XDataKinds -XGADTs
+
+data DoorState = Opened | Closed deriving Show
+
+-- We have two types, `Opened` and `Closed` of kind `DoorState`,
+-- but they have no values
+
+:{
+-- We can define two singletons for them as GADTs
+-- `s` has kind `DoorState`
+-- `SDoorState Closed` is a singleton type with only one value `SClosed`
+-- `SDoorState Opened` is a singleton type with only one value `SOpened`
+
+data SDoorState (s :: DoorState) where
+  SClosed :: SDoorState Closed
+  SOpened :: SDoorState Opened
+:}
+
+-- `SClosed/SOpened` are explicit singletons, sometimes is more convenient
+-- to work with them implicitly via the following type class
+
+:{
+class SDoorStateI (s :: DoorState) where
+  sDoorState :: SDoorState s
+
+instance SDoorStateI Closed where
+  sDoorState = SClosed
+
+instance SDoorStateI Opened where
+  sDoorState = SOpened
+
+-- We can now associate directly a type `Closed` with a singleton value
+:}
+
+-- We are now ready to describe the door
+:{
+data Door (s :: DoorState) where
+  MkDoor :: SDoorStateI s => Door s
+
+open :: Door Closed -> Door Opened
+open _ = MkDoor
+
+close :: Door Opened -> Door Closed
+close _ = MkDoor
+
+-- NOTE: `MkDoor` is the data constructor, it should be useless, but
+-- it's needed to bring in the `SDoorStateI` type class
+doorState :: forall (s :: DoorState). Door s -> DoorState
+doorState MkDoor =
+  case sDoorState :: SDoorState s of
+    SOpened -> Opened
+    SClosed -> Closed
+
+instance Show (Door s) where
+  show d = show (doorState d)
+:}
+
+:{
+data SomeDoor where
+  SomeDoor :: Door s -> SomeDoor
+
+instance Show SomeDoor where
+  show (SomeDoor d) = show d
+
+parseDoor :: String -> Maybe SomeDoor
+parseDoor "Opened" = Just $ SomeDoor (MkDoor :: Door Opened)
+parseDoor "Closed" = Just $ SomeDoor (MkDoor :: Door Closed)
+parseDoor _ = Nothing
+
+switchState :: forall s. Door s -> SomeDoor
+switchState door@MkDoor =
+  case sDoorState :: SDoorState s of
+    SOpened -> SomeDoor $ close door
+    SClosed -> SomeDoor $ open door
+
+main :: IO (String) -> IO ()
+main arg = do
+  md <- parseDoor <$> arg
+  case md of
+    (Just (SomeDoor d)) -> do
+      putStrLn $ "The door was " <> show d
+      putStrLn $ "The door now is " <> (show $ switchState d)
+    Nothing -> putStrLn "Not a valid door state"
+:}
+
+main $ pure "Opened"
+
+:i Opened
+:k Opened
+:t SClosed
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+The door was Opened
+The door now is Closed
+type DoorState :: *
+data DoorState = Opened | ...
+        -- Defined at <interactive>:9016:18
+Opened :: DoorState
+SClosed :: SDoorState 'Closed
+#+END_EXAMPLE
+
+NOTE: I don't understand why so much complication, so I wanted to start from the
+end aka from the need to have two functions ~open~ and ~close~ that can be
+called only with the right door state.
+
+#+BEGIN_SRC haskell
+:set -XDataKinds -XGADTs
+
+data DoorState = Opened | Closed deriving Show
+
+-- We cannot have functions like the following
+-- open :: DoorState -> DoorState
+-- close :: DoorState -> DoorState
+-- because you can call the function with the door in the wrong state
+
+-- We need a type for each state...
+-- With GADTs we already have those state, witch are 'Opened and 'Closed
+-- what we don't have are the values for those state
+
+:{
+data SDoorState (s :: DoorState) where
+  SClosed :: SDoorState Closed
+  SOpened :: SDoorState Opened
+
+-- `SClosed` is the singleton type for `SDoorState Closed`
+-- `SOpened` is the singleton type for `SDoorState Opened`
+
+instance Show (SDoorState s) where
+  show SClosed = "Closed"
+  show SOpened = "Opened"
+
+open :: SDoorState Closed -> SDoorState Opened
+open _ = SOpened
+
+close :: SDoorState Opened -> SDoorState Closed
+close _ = SClosed
+
+data SomeDoor where
+  SomeDoor :: SDoorState s -> SomeDoor
+
+instance Show SomeDoor where
+  show (SomeDoor d) = show d
+
+parseDoor :: String -> Maybe SomeDoor
+parseDoor "Opened" = Just $ SomeDoor SOpened
+parseDoor "Closed" = Just $ SomeDoor SClosed
+parseDoor _ = Nothing
+
+switchState :: forall s. SDoorState s -> SomeDoor
+switchState d@SClosed = SomeDoor $ open d
+switchState d@SOpened = SomeDoor $ close d
+
+main :: IO (String) -> IO ()
+main arg = do
+  md <- parseDoor <$> arg
+  case md of
+    (Just (SomeDoor d)) -> do
+      putStrLn $ "The door was " <> show d
+      putStrLn $ "The door now is " <> (show $ switchState d)
+    Nothing -> putStrLn "Not a valid door state"
+:}
+
+main $ pure "Opened"
+
+#+END_SRC
+
+#+RESULTS:
+#+BEGIN_EXAMPLE
+The door was Opened
+The door now is Closed
+#+END_EXAMPLE
+
+NOTE: So you can do everything with much less complication
+ASK: am I missing something?
+
+Let's do the same thing with ~singletons~ library
+
+NOTE: unable to make it run here in GHCi :-/
+
+#+BEGIN_SRC haskell never
+import Data.Singletons.TH
+
+$(singletons [d|
+data DoorState = Opened | Closed
+  deriving Show
+|])
+
+-- Generates
+-- `SDoorState s` type with values `SOpened` and `SClosed`
+-- `SingI s` type class instance with method `sing :: SDoorState s`
+-- The method `fromSing :: s`
+
+data Door (s :: DoorState) where
+  MkDoor :: SingI s => Door s
+
+doorState :: forall s. Door s -> DoorState
+doorState MkDoor = fromSing (sing :: SDoorState s)
+
+switchState :: forall s. Door s -> SomeDoor
+switchState door@MkDoor =
+  case sing :: SDoorState s of
+    SOpened -> SomeDoor (close door)
+    SClosed -> SomeDoor (open door)
+#+END_SRC
+
+TODO: read [[https://blog.jle.im/entries/series/+introduction-to-singletons.html][this tutorial]]
+
+** 13.2.3 Type-safe interface for elevators
+1. We start with floors and ensure safety of moving between floors.
+2. We define an elevator with respect to a current floor and door state.
+3. We define an higher level interface for elevators.
+4. With a type-safe interface we need to bridge it to user input.
+5. Finally we run a simulation.
+
+NOTE: Safety costs a lot in both time and complexity of development.
+
+#+BEGIN_SRC haskell
+:set -XKindSignatures -XTypeOperators -XPolyKinds -XDataKinds -XTypeFamilies
+:set -XFlexibleInstances -XInstanceSigs -XScopedTypeVariables
+
+
+#+END_SRC
+
+
+* Summary
+TODO
+
+* Exercises
+** Singletons
+- Read [[https://blog.jle.im/entries/series/+introduction-to-singletons.html][this tutorial]]
+** CHIP-8 material to look at for the next time
+- [[https://multigesture.net/articles/how-to-write-an-emulator-chip-8-interpreter/][Gentle guide]]
+- [[https://www.freecodecamp.org/news/creating-your-very-own-chip-8-emulator/][Another guide, for reference]]
+- [[https://github.com/mattmikolay/chip-8/wiki/Mastering-CHIP%E2%80%908][Extensive reference]]
+- [[http://devernay.free.fr/hacks/chip8/C8TECH10.HTM][Quick reference]]
+- [[https://chip-8.github.io/links/][Collection of references and links]]
