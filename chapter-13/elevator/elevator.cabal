@@ -1,0 +1,133 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.35.1.
+--
+-- see: https://github.com/sol/hpack
+
+name:           elevator
+version:        0.1.0.0
+description:    Please see the README on GitHub at <https://github.com/gabrielelana/elevator#readme>
+homepage:       https://github.com/gabrielelana/elevator#readme
+bug-reports:    https://github.com/gabrielelana/elevator/issues
+author:         Gabriele Lana
+maintainer:     gabriele.lana@gmail.com
+copyright:      Copyright (c) 2021 Gabriele Lana &lt;gabriele.lana@gmail.com&gt;
+license:        BSD3
+license-file:   LICENSE
+build-type:     Simple
+extra-source-files:
+    README.md
+    CHANGELOG.md
+
+source-repository head
+  type: git
+  location: https://github.com/gabrielelana/elevator
+
+library
+  exposed-modules:
+      Lib
+  other-modules:
+      Paths_elevator
+  hs-source-dirs:
+      src
+  default-extensions:
+      CPP
+      KindSignatures
+      DataKinds
+      ScopedTypeVariables
+      TypeOperators
+      TypeFamilies
+      DerivingStrategies
+      ConstraintKinds
+      GADTs
+      FlexibleContexts
+      TemplateHaskell
+      EmptyCase
+      TypeApplications
+      UndecidableInstances
+      InstanceSigs
+      StandaloneDeriving
+      StandaloneKindSignatures
+      RankNTypes
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
+  build-depends:
+      base >=4.7 && <5
+    , dec
+    , fin
+    , mtl
+    , singletons
+    , singletons-th
+  default-language: Haskell2010
+
+executable elevator-exe
+  main-is: Main.hs
+  other-modules:
+      Paths_elevator
+  hs-source-dirs:
+      app
+  default-extensions:
+      CPP
+      KindSignatures
+      DataKinds
+      ScopedTypeVariables
+      TypeOperators
+      TypeFamilies
+      DerivingStrategies
+      ConstraintKinds
+      GADTs
+      FlexibleContexts
+      TemplateHaskell
+      EmptyCase
+      TypeApplications
+      UndecidableInstances
+      InstanceSigs
+      StandaloneDeriving
+      StandaloneKindSignatures
+      RankNTypes
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.7 && <5
+    , dec
+    , elevator
+    , fin
+    , mtl
+    , singletons
+    , singletons-th
+  default-language: Haskell2010
+
+test-suite elevator-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Paths_elevator
+  hs-source-dirs:
+      test
+  default-extensions:
+      CPP
+      KindSignatures
+      DataKinds
+      ScopedTypeVariables
+      TypeOperators
+      TypeFamilies
+      DerivingStrategies
+      ConstraintKinds
+      GADTs
+      FlexibleContexts
+      TemplateHaskell
+      EmptyCase
+      TypeApplications
+      UndecidableInstances
+      InstanceSigs
+      StandaloneDeriving
+      StandaloneKindSignatures
+      RankNTypes
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.7 && <5
+    , dec
+    , elevator
+    , fin
+    , mtl
+    , singletons
+    , singletons-th
+  default-language: Haskell2010

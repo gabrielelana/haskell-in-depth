@@ -281,8 +281,6 @@ check s1
 
 #+RESULTS:
 #+BEGIN_EXAMPLE
-
-<interactive>:1:1: error: Not in scope: type variable ‘layout’
 (Server BookAPI) :: *
 = IO ServiceStatus
   :<|> ((Int -> IO [Char])
@@ -731,7 +729,7 @@ The door was Opened
 The door now is Closed
 type DoorState :: *
 data DoorState = Opened | ...
-        -- Defined at <interactive>:9016:18
+        -- Defined at <interactive>:832:18
 Opened :: DoorState
 SClosed :: SDoorState 'Closed
 #+END_EXAMPLE
@@ -851,16 +849,152 @@ TODO: read [[https://blog.jle.im/entries/series/+introduction-to-singletons.html
 
 NOTE: Safety costs a lot in both time and complexity of development.
 
+*** Type safety for floors
+
 #+BEGIN_SRC haskell
-:set -XKindSignatures -XTypeOperators -XPolyKinds -XDataKinds -XTypeFamilies
-:set -XFlexibleInstances -XInstanceSigs -XScopedTypeVariables
+:set -XScopedTypeVariables
+:set -XTypeOperators
+:set -XKindSignatures
+:set -XDataKinds
+:set -XGADTs
+:set -XConstraintKinds
+:set -XFlexibleContexts
+:set -XRankNTypes
+
+import Data.Type.Nat
+import Data.Type.Nat.LE
+import Data.Type.Equality
+import Data.Type.Dec
+
+-- A floor is described by two numbers: the maximum number
+-- of floors and the current floor, and he relationship between them
+
+-- GoodFloor is a constraint, consisting of 3 constraint
 
 
+:{
+type GoodFloor mf cf = (
+  -- we can always get a singleton of `maximum floor` natural number
+  SNatI mf,
+  -- we can always get a singleton of `current floor` natural number
+  SNatI cf,
+  -- current floor is less than or equal the maximum floor
+  LE cf mf)
+:}
+
+:k GoodFloor
+
+-- Every floor must stick to this constraint, we can specify them to the constructor
+
+-- ASK: what's the magic for which a tuple of constraints is a constraint?
+
+:{
+data Floor (mf :: Nat) (cf :: Nat) where
+  MkFloor :: GoodFloor mf cf => Floor mf cf
+:}
+
+-- We don't need the values of the floors we can always get them through the singletons
+
+:{
+instance Show (Floor mf cf) where
+  show MkFloor = "Floor " <> show (snatToNat (snat :: SNat cf))
+                 <> " of " <> show (snatToNat (snat :: SNat mf))
+:}
+
+MkFloor :: Floor Nat5 Nat0
+
+-- Constraint to check that we are not at the maximum floor
+
+type BelowTop mf cf = LE (S cf) mf
+
+-- NOTE: I tried and this is the proof needed by the compiler, you can require
+-- them or you can derive them
+-- type AboveBottom mf cf = (SNatI cf, LE cf mf)
+
+:{
+up :: BelowTop mf cf => Floor mf cf -> Floor mf (S cf)
+up MkFloor = MkFloor
+
+-- withSNat :: SNat n -> (SNatI n => r) -> r
+-- withLEProof :: LEProof n m -> (LE n m => r) -> r
+
+-- down :: AboveBottom mf cf => Floor mf (S cf) -> Floor mf cf
+down :: forall mf cf. Floor mf (S cf) -> Floor mf cf
+down MkFloor =
+  withSNat n $
+    withLEProof p
+      MkFloor
+  where
+    n :: SNat cf
+    n = case snat :: SNat (S cf) of
+          SS -> snat
+    p :: LEProof cf mf
+    p = leStepL leProof
+:}
+
+import Data.Type.Equality
+
+-- How can we prove that two floors are the same?
+
+-- from Data.Type.Equality we get the type operator :~: with ~Refl~ data constructor which
+-- will bring the ~ type equality constraint
+
+-- eqNat :: forall n m. (SNatI n, SNatI m) => Maybe (n :~: m)
+
+:{
+sameFloor :: forall m from to. Floor m to -> Floor m from -> Maybe (to :~: from)
+sameFloor MkFloor MkFloor = eqNat
+:}
+
+sameFloor (MkFloor :: Floor Nat5 Nat3) (MkFloor :: Floor Nat5 Nat3)
+sameFloor (MkFloor :: Floor Nat5 Nat3) (MkFloor :: Floor Nat5 Nat0)
+
+-- To build a floor we need to proof that the current floor is less than equal maximum floor
+
+-- decideLE :: forall n m. (SNatI n, SNatI m) => Dec (LEProof n m)
+-- data Dec a = Yes a | No (Neg a)
+-- data Neg a = a -> Void
+
+:{
+mkFloor :: forall m c. (SNatI m, SNatI c) => Maybe (Floor m c)
+mkFloor = case decideLE :: Dec (LEProof c m) of
+            Yes p -> withLEProof p $ Just MkFloor
+            No _ -> Nothing
+:}
+
+mkFloor :: Maybe (Floor Nat5 Nat0)
+mkFloor :: Maybe (Floor Nat5 Nat5)
+mkFloor :: Maybe (Floor Nat5 Nat6)
 #+END_SRC
 
+#+RESULTS:
+#+BEGIN_EXAMPLE
+GoodFloor :: Nat -> Nat -> Constraint
+Floor 0 of 5
+Just Refl
+Nothing
+Just Floor 0 of 5
+Just Floor 5 of 5
+Nothing
+#+END_EXAMPLE
+
+*** Type safety for elevator and primitives
+[[file:chapter-13/elevator/src/Lib.hs::{-# OPTIONS_GHC -Wno-unused-top-binds #-}][See this]]
+
+*** Deciding elevator moves
+[[file:chapter-13/elevator/src/Lib.hs::{-# OPTIONS_GHC -Wno-unused-top-binds #-}][See this]]
+
+*** High level elevator interface
+[[file:chapter-13/elevator/src/Lib.hs::{-# OPTIONS_GHC -Wno-unused-top-binds #-}][See this]]
+
+*** Running a simulation
+[[file:chapter-13/elevator/src/Lib.hs::{-# OPTIONS_GHC -Wno-unused-top-binds #-}][See this]]
 
 * Summary
-TODO
+- Use types to define a language that describes application domain (Web API).
+- Type classes used to implement behaviour depending on the specific type.
+- When using dependent types we need to prove facts to GHC.
+- Type-safe instances can eliminate some run-time checks.
 
 * Exercises
 ** Singletons
